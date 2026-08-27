@@ -97,7 +97,11 @@ class IOUTracker:
         self._next_id = 1
 
     def update(self, dets, now):
-        """검출 목록 -> 확정된 트랙 목록. dets는 detector.infer() 결과 형식."""
+        """검출 목록 -> 확정된 트랙 목록. dets는 detector.infer() 결과 형식.
+
+        now는 단조 시계(time.monotonic) 기준 초. 벽시계를 넣으면 시각 점프에
+        체류 시간 계산이 흔들린다.
+        """
         for t in self.tracks:                       # SORT의 predict 단계에 해당
             t.time_since_update += 1
 

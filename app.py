@@ -88,7 +88,9 @@ class DetectionWorker:
                 continue
             infer_ms = (time.perf_counter() - t0) * 1000
 
-            now = time.time()
+            # 체류 시간은 단조 시계로 잰다. time.time()은 NTP 동기화로 값이 점프해서
+            # 체류 판정이 틀어질 수 있다 (Pi는 RTC가 없어 부팅 직후 크게 뛴다).
+            now = time.monotonic()
             tracks = self.tracker.update(results, now)
             self._match_rois(tracks, now)
 

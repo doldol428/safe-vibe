@@ -1,7 +1,18 @@
 numpy
-opencv-python-headless
 onnxruntime
+
+# opencv는 headless 만 쓴다. opencv-python(full)과 함께 설치하면 둘 다 같은
+# cv2 경로에 덮어써서 충돌하고, full 버전은 GUI 의존성(Qt/GTK)을 끌고 와
+# 헤드리스 서버나 Pi에서 import가 깨진다.
+#   확인:  pip list | grep opencv     -> headless 하나만 남아야 함
+#   복구:  pip uninstall -y opencv-python opencv-python-headless
+#          pip install opencv-python-headless
+# ultralytics 같은 패키지를 설치하면 opencv-python이 딸려 들어오므로 주의.
+opencv-python-headless
 
 # 라즈베리파이에서는 아래를 apt로 설치한다 (pip 빌드가 오래 걸림):
 #   sudo apt install -y python3-picamera2 python3-opencv python3-numpy
 #   pip install onnxruntime
+#
+# 모델 export(ultralytics, torch)는 개발 PC에서 한 번만 하면 되고,
+# 실행에는 필요 없다. Pi에는 설치하지 말 것.

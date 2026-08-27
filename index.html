@@ -36,7 +36,19 @@
   button.icon { padding: 4px 7px; background: none; color: var(--label-dim); }
   button.icon:hover { background: var(--fill); color: var(--label); }
 
-  #list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; flex: 1; }
+  /* 기본 스크롤바가 패널 톤과 안 맞아 얇게 다시 그린다.
+     내용이 넘칠 때만 보이고, 폭을 차지하지 않도록 overlay 방식으로 둔다. */
+  .scroll { overflow-y: auto; overscroll-behavior: contain;
+            scrollbar-width: thin;                            /* Firefox */
+            scrollbar-color: var(--fill-strong) transparent; }
+  .scroll::-webkit-scrollbar { width: 6px; }
+  .scroll::-webkit-scrollbar-track { background: transparent; }
+  .scroll::-webkit-scrollbar-thumb { background: var(--fill-strong);
+                                     border-radius: 3px; }
+  .scroll::-webkit-scrollbar-thumb:hover { background: #4e4e58; }
+  .scroll::-webkit-scrollbar-thumb:active { background: var(--zone); }
+
+  #list { display: flex; flex-direction: column; gap: 2px; flex: 1; }
   .item { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
           border-radius: 8px; cursor: pointer; }
   .item:hover { background: var(--fill); }
@@ -66,7 +78,7 @@
             display: flex; flex-wrap: wrap; gap: 4px 12px;
             color: var(--label-dim); font-size: 11px; }
   #status b { color: var(--label); font-weight: 600; }
-  #events { max-height: 128px; overflow-y: auto; display: flex;
+  #events { max-height: 128px; display: flex;
             flex-direction: column; gap: 3px; }
   #events div { font-size: 11px; color: var(--label-dim); }
   #events b { color: var(--alert); font-weight: 600; }
@@ -89,9 +101,9 @@
     <button id="add">+ 추가</button>
     <button id="done" hidden>완료</button>
   </header>
-  <div id="list"></div>
+  <div id="list" class="scroll"></div>
   <h2>이벤트</h2>
-  <div id="events"></div>
+  <div id="events" class="scroll"></div>
   <div id="status"></div>
 </aside>
 

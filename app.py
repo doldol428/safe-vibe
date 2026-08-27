@@ -290,8 +290,10 @@ class Handler(BaseHTTPRequestHandler):
                     f"Content-Length: {len(jpeg)}\r\n\r\n".encode())
                 self.wfile.write(jpeg)
                 self.wfile.write(b"\r\n")
-        except (BrokenPipeError, ConnectionResetError):
-            pass  # 클라이언트가 탭을 닫음
+        except OSError:
+            # 클라이언트가 탭을 닫음. Windows는 ConnectionAbortedError(10053),
+            # Linux는 BrokenPipeError를 낸다. 전부 OSError 하위라 한 번에 잡는다.
+            pass
 
     def log_message(self, fmt, *args):
         pass

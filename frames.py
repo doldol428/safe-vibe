@@ -20,7 +20,10 @@ import numpy as np
 CAPTURE_W = int(os.environ.get("CAPTURE_W", "1280"))
 CAPTURE_H = int(os.environ.get("CAPTURE_H", "720"))
 STREAM_FPS = float(os.environ.get("STREAM_FPS", "15"))
-JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "80"))
+JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "75"))
+# 송출용 가로 해상도. AI는 캡처 원본을 쓰고 브라우저에만 축소본을 보낸다.
+# 0이면 캡처 해상도 그대로. 720p q75는 약 20Mbps, 960 폭은 약 12Mbps.
+STREAM_W = int(os.environ.get("STREAM_W", "960"))
 
 
 class FrameSource:
@@ -151,9 +154,11 @@ class FrameHub:
 class Pipeline:
     """캡처 스레드 하나가 raw 프레임 보관 + JPEG 인코딩을 담당한다."""
 
-    def __init__(self, source, quality=JPEG_QUALITY):
+    def __init__(self, source, quality=JPEG_QUALITY, stream_w=STREAM_W):
         self.source = source
         self.quality = quality
+        self.stream_w = stream_w
+        self.stream_size = None      # 첫 프레임에서 결정
         self.hub = FrameHub()
         self._lock = threading.Lock()
         self._frame = None
@@ -174,6 +179,16 @@ class Pipeline:
         with self._lock:
             return self._frame, self._frame_seq
 
+    def _for_stream(self, frame):
+        """송출용 축소. 브라우저는 원본 해상도가 필요 없고 대역폭만 먹는다."""
+        h, w = frame.shape[:2]
+        if not self.stream_w or self.stream_w >= w:
+            self.stream_size = (w, h)
+            return frame
+        if self.stream_size is None or self.stream_size[0] != self.stream_w:
+            self.stream_size = (self.stream_w, round(h * self.stream_w / w) // 2 * 2)
+        return cv2.resize(frame, self.stream_size, interpolation=cv2.INTER_AREA)
+
     def _loop(self):
         ema, prev = None, None
         while not self._stop.is_set():
@@ -181,10 +196,11 @@ class Pipeline:
             if frame is None:
                 continue
             with self._lock:
-                self._frame = frame
+                self._frame = frame          # AI는 축소 전 원본을 쓴다
                 self._frame_seq += 1
             ok, buf = cv2.imencode(
-                ".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, self.quality])
+                ".jpg", self._for_stream(frame),
+                [cv2.IMWRITE_JPEG_QUALITY, self.quality])
             if ok:
                 self.hub.publish(buf.tobytes())
 

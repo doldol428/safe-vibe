@@ -221,7 +221,9 @@ class Handler(BaseHTTPRequestHandler):
         return {
             "source": self.source_name,
             "capture": [frames.CAPTURE_W, frames.CAPTURE_H],
+            "stream": list(self.pipeline.stream_size or []),
             "stream_fps": frames.STREAM_FPS,
+            "jpeg_quality": frames.JPEG_QUALITY,
             "ai_fps_target": AI_FPS,
             "model": model.path.name if model else None,
             "model_input": list(model.size) if model else None,

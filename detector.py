@@ -32,6 +32,9 @@ class Detector:
         threads = int(os.environ.get("ORT_THREADS", "0"))
         if threads:
             opts.intra_op_num_threads = threads
+        # 기본값이면 추론 사이에 스레드풀이 CPU를 태우며 대기한다(spin-wait).
+        # 캡처/JPEG 인코딩 스레드와 코어를 두고 싸우면서 추론이 2배 이상 느려지므로 끈다.
+        opts.add_session_config_entry("session.intra_op.allow_spinning", "0")
         self.sess = ort.InferenceSession(
             str(self.path), opts, providers=["CPUExecutionProvider"])
 

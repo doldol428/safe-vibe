@@ -5,15 +5,8 @@
 import json
 import os
 import threading
-from pathlib import Path
 
-MAX_ROI = 10        # vunexai-frontend 의 MAX_ROI_COUNT 와 동일
-MAX_POINTS = 30
-MAX_NAME = 50
-DEFAULT_NAME = "New Zone"
-
-ROI_FILE = Path(os.environ.get(
-    "ROI_FILE", Path(__file__).resolve().parent / "roi.json"))
+from config import (DEFAULT_ROI_NAME, MAX_NAME, MAX_POINTS, MAX_ROI, ROI_FILE)
 
 _lock = threading.Lock()
 
@@ -38,7 +31,7 @@ def _clean_points(raw):
 def _clean_roi(raw, roi_id):
     return {
         "id": roi_id,
-        "name": str(raw.get("name") or DEFAULT_NAME)[:MAX_NAME],
+        "name": str(raw.get("name") or DEFAULT_ROI_NAME)[:MAX_NAME],
         "enabled": bool(raw.get("enabled", True)),
         "points": _clean_points(raw.get("points")),
     }

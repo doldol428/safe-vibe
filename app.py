@@ -1,4 +1,4 @@
-"""안전모 감시 데모 — 프레임 소스 하나에서 AI 추론과 MJPEG 송출을 분리한다.
+﻿"""안전모 감시 데모 — 프레임 소스 하나에서 AI 추론과 MJPEG 송출을 분리한다.
 
     FrameSource (Picamera2 / ffmpeg)
             |
@@ -14,34 +14,20 @@ AI는 raw 프레임을 그대로 쓰고, 웹 송출용 JPEG는 따로 만든다.
 MJPEG을 다시 디코드해서 추론에 쓰는 낭비가 없다.
 """
 import json
-import os
 import re
 import socket
 import threading
 import time
 from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
+import config as cfg
 import detector as det
 import frames
 import roistore
 import tracker as trk
 
-HERE = Path(__file__).resolve().parent
-INDEX_FILE = HERE / "index.html"
-VIDEO = os.environ.get("VIDEO")     # 비우면 video/ 의 단일 mp4를 찾는다
-PORT = int(os.environ.get("PORT", "8080"))
-AI_FPS = float(os.environ.get("AI_FPS", "4"))
-EVENT_CLASSES = [c.strip() for c in
-                 os.environ.get("EVENT_CLASSES", "person").split(",") if c.strip()]
-# ROI 안에 이만큼 계속 머물러야 이벤트를 낸다. 스쳐 지나가는 것과 구분한다.
-DWELL_SEC = float(os.environ.get("DWELL_SEC", "2"))
-# ROI 경계에서 박스가 흔들리면 진입/이탈이 반복돼 같은 사람이 여러 번 잡힌다.
-# 이만큼 계속 벗어나 있어야 "나갔다"로 인정한다.
-EXIT_SEC = float(os.environ.get("EXIT_SEC", "2"))
-
-BOUNDARY = "frame"
+BOUNDARY = "frame"      # multipart 경계 문자열 (설정이 아니라 프로토콜 값)
 
 
 # ---------------------------------------------------------------- 추론 워커
@@ -61,8 +47,8 @@ class DetectionWorker:
         self.detections = []
         self.roi_hits = {}
         self.infer_ms = 0.0
-        self.ai_fps = 0.0
-        self.events = deque(maxlen=50)
+        self.meter = frames.FpsMeter()
+        self.events = deque(maxlen=cfg.EVENT_LOG_SIZE)
         self._stop = threading.Event()
 
     def start(self):
@@ -75,7 +61,7 @@ class DetectionWorker:
                 "detections": list(self.detections),
                 "roi_hits": dict(self.roi_hits),
                 "infer_ms": round(self.infer_ms, 1),
-                "ai_fps": self.ai_fps,
+                "ai_fps": self.meter.value,
             }
 
     def event_list(self):
@@ -83,8 +69,8 @@ class DetectionWorker:
             return list(self.events)
 
     def _loop(self):
-        interval = 1.0 / AI_FPS if AI_FPS > 0 else 0.25
-        last_seq, ema, prev = -1, None, None
+        interval = 1.0 / cfg.AI_FPS if cfg.AI_FPS > 0 else 0.25
+        last_seq = -1
         while not self._stop.is_set():
             started = time.perf_counter()
             frame, seq = self.pipeline.latest()
@@ -106,13 +92,7 @@ class DetectionWorker:
             tracks = self.tracker.update(results, now)
             self._match_rois(tracks, now)
 
-            now = time.perf_counter()
-            if prev is not None:
-                dt = now - prev
-                ema = dt if ema is None else ema * 0.8 + dt * 0.2
-                with self.lock:
-                    self.ai_fps = round(1 / ema, 1) if ema > 0 else 0.0
-            prev = now
+            self.meter.tick()
             with self.lock:
                 self.infer_ms = infer_ms
 
@@ -146,15 +126,15 @@ class DetectionWorker:
 
             for rid in set(t.roi_since) - inside:        # 벗어나 있는 중
                 t.roi_left.setdefault(rid, now)
-                if now - t.roi_left[rid] >= EXIT_SEC:    # 확실히 나감 -> 초기화
+                if now - t.roi_left[rid] >= cfg.EXIT_SEC:    # 확실히 나감 -> 초기화
                     del t.roi_since[rid]
                     del t.roi_left[rid]
                     t.roi_fired.discard(rid)
 
             for rid in inside:
                 hits[rid] += 1
-                if (t.name in EVENT_CLASSES and rid not in t.roi_fired
-                        and now - t.roi_since[rid] >= DWELL_SEC):
+                if (t.name in cfg.EVENT_CLASSES and rid not in t.roi_fired
+                        and now - t.roi_since[rid] >= cfg.DWELL_SEC):
                     t.roi_fired.add(rid)
                     fired.append((t, rid))
 
@@ -171,7 +151,7 @@ class DetectionWorker:
                     "dwell": round(now - t.roi_since[rid], 1),
                 })
                 print(f"[event] {names.get(rid)} — #{t.id} {t.name} "
-                      f"{DWELL_SEC}초 이상 체류", flush=True)
+                      f"{cfg.DWELL_SEC}초 이상 체류", flush=True)
 
 
 # ---------------------------------------------------------------- HTTP
@@ -203,7 +183,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/stream.mjpg"):
             self.stream()
         elif self.path == "/api/rois":
-            self._json({"rois": roistore.list_rois(), "max": roistore.MAX_ROI})
+            self._json({"rois": roistore.list_rois(), "max": cfg.MAX_ROI})
         elif self.path == "/api/detections":
             snap = self.worker.snapshot() if self.worker else {
                 "detections": [], "roi_hits": {}, "infer_ms": 0, "ai_fps": 0}
@@ -249,23 +229,23 @@ class Handler(BaseHTTPRequestHandler):
         model = self.worker.model if self.worker else None
         return {
             "source": self.source_name,
-            "capture": [frames.CAPTURE_W, frames.CAPTURE_H],
+            "capture": [cfg.CAPTURE_W, cfg.CAPTURE_H],
             "stream": list(self.pipeline.stream_size or []),
-            "stream_fps": frames.STREAM_FPS,
-            "jpeg_quality": frames.JPEG_QUALITY,
-            "ai_fps_target": AI_FPS,
+            "stream_fps": cfg.STREAM_FPS,
+            "jpeg_quality": cfg.JPEG_QUALITY,
+            "ai_fps_target": cfg.AI_FPS,
             "model": model.path.name if model else None,
             "model_input": list(model.size) if model else None,
             "classes": len(model.names) if model else 0,
-            "event_classes": EVENT_CLASSES,
-            "tracker": (f"IoU (max_age={trk.MAX_AGE}, min_hits={trk.MIN_HITS}, "
-                        f"iou={trk.IOU_THRESHOLD})"),
-            "dwell_sec": DWELL_SEC,
+            "event_classes": cfg.EVENT_CLASSES,
+            "tracker": (f"IoU (max_age={cfg.TRACK_MAX_AGE}, min_hits={cfg.TRACK_MIN_HITS}, "
+                        f"iou={cfg.TRACK_IOU})"),
+            "dwell_sec": cfg.DWELL_SEC,
         }
 
     def serve_index(self):
         try:
-            body = INDEX_FILE.read_bytes()
+            body = cfg.INDEX_FILE.read_bytes()
         except FileNotFoundError:
             return self.send_error(500, "index.html not found")
         self.send_response(200)
@@ -303,7 +283,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     try:
-        source, source_name = frames.open_source(VIDEO)
+        source, source_name = frames.open_source(cfg.VIDEO)
     except (frames.NoVideoError, RuntimeError) as e:
         raise SystemExit(f"프레임 소스를 열 수 없습니다: {e}")
     pipeline = frames.Pipeline(source).start()
@@ -336,19 +316,19 @@ def main():
             self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
             super().server_bind()
 
-    print(f"source: {source_name} @ {frames.CAPTURE_W}x{frames.CAPTURE_H} "
-          f"{frames.STREAM_FPS}fps (AI {AI_FPS}fps)", flush=True)
+    print(f"source: {source_name} @ {cfg.CAPTURE_W}x{cfg.CAPTURE_H} "
+          f"{cfg.STREAM_FPS}fps (AI {cfg.AI_FPS}fps)", flush=True)
     print(f"roi   : {roistore.ROI_FILE} -> {len(roistore.list_rois())} ROI", flush=True)
-    print(f"serving http://localhost:{PORT}", flush=True)
+    print(f"serving http://localhost:{cfg.PORT}", flush=True)
     try:
         # OSError를 잡아서 폴백하면 "포트 사용 중" 에러까지 삼켜버리므로,
         # IPv6 지원 여부는 미리 물어보고 고른다.
-        httpd = (DualStackServer(("::", PORT), Handler)
+        httpd = (DualStackServer(("::", cfg.PORT), Handler)
                  if socket.has_dualstack_ipv6()
-                 else Server(("0.0.0.0", PORT), Handler))
+                 else Server(("0.0.0.0", cfg.PORT), Handler))
         httpd.serve_forever()
     except OSError as e:
-        raise SystemExit(f"포트 {PORT} 바인딩 실패 (이미 실행 중?): {e}")
+        raise SystemExit(f"포트 {cfg.PORT} 바인딩 실패 (이미 실행 중?): {e}")
     except KeyboardInterrupt:
         pass
     finally:

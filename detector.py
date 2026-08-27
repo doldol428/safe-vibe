@@ -5,17 +5,13 @@ Triton 없이 python onnxruntime 만 쓴다. 모델은 디렉터리에 하나만
 코드를 고칠 필요가 없다 (COCO YOLOv8m -> 안전모 모델 등).
 """
 import ast
-import os
 from pathlib import Path
 
 import cv2
 import numpy as np
 import onnxruntime as ort
 
-MODEL_DIR = Path(os.environ.get(
-    "MODEL_DIR", Path(__file__).resolve().parent / "model"))
-CONF_THRESHOLD = float(os.environ.get("CONF_THRESHOLD", "0.35"))
-IOU_THRESHOLD = float(os.environ.get("IOU_THRESHOLD", "0.5"))
+from config import CONF_THRESHOLD, MODEL_DIR, NMS_IOU, ORT_THREADS
 
 
 class NoModelError(RuntimeError):
@@ -24,14 +20,13 @@ class NoModelError(RuntimeError):
 
 class Detector:
     def __init__(self, model_dir=MODEL_DIR,
-                 conf=CONF_THRESHOLD, iou=IOU_THRESHOLD):
+                 conf=CONF_THRESHOLD, iou=NMS_IOU):
         self.path = self._find_model(Path(model_dir))
         self.conf, self.iou = conf, iou
 
         opts = ort.SessionOptions()
-        threads = int(os.environ.get("ORT_THREADS", "0"))
-        if threads:
-            opts.intra_op_num_threads = threads
+        if ORT_THREADS:
+            opts.intra_op_num_threads = ORT_THREADS
         # 기본값이면 추론 사이에 스레드풀이 CPU를 태우며 대기한다(spin-wait).
         # 캡처/JPEG 인코딩 스레드와 코어를 두고 싸우면서 추론이 2배 이상 느려지므로 끈다.
         opts.add_session_config_entry("session.intra_op.allow_spinning", "0")

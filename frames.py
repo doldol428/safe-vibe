@@ -7,25 +7,38 @@
 AI용 raw 프레임과 모니터링용 JPEG를 분리해서, MJPEG을 다시 디코드하는 낭비가 없다.
 카메라가 바뀌어도(FfmpegSource <-> PicameraSource) 위쪽 코드는 손대지 않는다.
 """
-import os
 import shutil
 import subprocess
 import threading
 import time
+from collections import deque
 from pathlib import Path
 
 import cv2
 import numpy as np
 
-VIDEO_DIR = Path(os.environ.get(
-    "VIDEO_DIR", Path(__file__).resolve().parent / "video"))
-CAPTURE_W = int(os.environ.get("CAPTURE_W", "1280"))
-CAPTURE_H = int(os.environ.get("CAPTURE_H", "720"))
-STREAM_FPS = float(os.environ.get("STREAM_FPS", "15"))
-JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "75"))
-# 송출용 가로 해상도. AI는 캡처 원본을 쓰고 브라우저에만 축소본을 보낸다.
-# 0이면 캡처 해상도 그대로. 720p q75는 약 20Mbps, 960 폭은 약 12Mbps.
-STREAM_W = int(os.environ.get("STREAM_W", "960"))
+from config import (CAPTURE_H, CAPTURE_W, JPEG_QUALITY, SOURCE, STREAM_FPS,
+                    STREAM_W, VIDEO_DIR)
+
+
+class FpsMeter:
+    """최근 window초 동안의 실제 처리량. 프레임 간격 EMA는 소스가 가변 프레임률이면
+    값이 튀므로, 구간 평균으로 센다."""
+
+    def __init__(self, window=3.0):
+        self.window = window
+        self._stamps = deque()
+        self.value = 0.0
+
+    def tick(self):
+        now = time.perf_counter()
+        self._stamps.append(now)
+        while self._stamps and now - self._stamps[0] > self.window:
+            self._stamps.popleft()
+        span = self._stamps[-1] - self._stamps[0]
+        if len(self._stamps) > 1 and span > 0:
+            self.value = round((len(self._stamps) - 1) / span, 1)
+        return self.value
 
 
 class NoVideoError(RuntimeError):
@@ -132,8 +145,8 @@ class PicameraSource(FrameSource):
 
 
 def open_source(video=None, kind=None):
-    """SOURCE 환경변수로 고르되, 기본은 picamera2가 있으면 카메라, 없으면 영상 파일."""
-    kind = (kind or os.environ.get("SOURCE") or "auto").lower()
+    """config.SOURCE로 고르되, auto면 picamera2가 있을 때 카메라, 없으면 영상 파일."""
+    kind = (kind or SOURCE).lower()
     if kind == "auto":
         try:
             import picamera2  # noqa: F401
@@ -185,8 +198,12 @@ class Pipeline:
         self._lock = threading.Lock()
         self._frame = None
         self._frame_seq = 0
-        self.fps = 0.0
+        self._meter = FpsMeter()
         self._stop = threading.Event()
+
+    @property
+    def fps(self):
+        return self._meter.value
 
     def start(self):
         threading.Thread(target=self._loop, daemon=True).start()
@@ -212,7 +229,6 @@ class Pipeline:
         return cv2.resize(frame, self.stream_size, interpolation=cv2.INTER_AREA)
 
     def _loop(self):
-        ema, prev = None, None
         while not self._stop.is_set():
             frame = self.source.read()
             if frame is None:
@@ -225,10 +241,4 @@ class Pipeline:
                 [cv2.IMWRITE_JPEG_QUALITY, self.quality])
             if ok:
                 self.hub.publish(buf.tobytes())
-
-            now = time.perf_counter()
-            if prev is not None:
-                dt = now - prev
-                ema = dt if ema is None else ema * 0.9 + dt * 0.1
-                self.fps = round(1 / ema, 1) if ema > 0 else 0.0
-            prev = now
+                self._meter.tick()

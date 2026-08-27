@@ -13,17 +13,9 @@ SORT 단순화판으로, 검출 수가 수십 개 이하인 환경에서는 이 
   - 빈 행렬일 때 (0,2) 형태를 돌려줘 IndexError를 막는다.
   - IoU 분모에 1e-6을 더해 0 나눗셈을 막는다.
 """
-import os
-
 import numpy as np
 
-# max_age는 "프레임" 단위라 AI_FPS에 따라 실제 시간이 달라진다.
-# AI 4fps 기준 12프레임 = 약 3초. 검출이 끊겨도 이만큼은 트랙을 유지한다.
-# 크게 잡으면 ID는 안정되지만 사라진 객체의 트랙이 남아 다른 사람에게
-# 잘못 이어붙을 수 있다. 검출이 자주 끊기는 영상일수록 키워야 한다.
-MAX_AGE = int(os.environ.get("TRACK_MAX_AGE", "12"))
-MIN_HITS = int(os.environ.get("TRACK_MIN_HITS", "2"))   # 오검출 억제
-IOU_THRESHOLD = float(os.environ.get("TRACK_IOU", "0.3"))
+from config import TRACK_IOU, TRACK_MAX_AGE, TRACK_MIN_HITS
 
 
 def iou_batch(a, b):
@@ -96,8 +88,8 @@ class Track:
 
 
 class IOUTracker:
-    def __init__(self, max_age=MAX_AGE, min_hits=MIN_HITS,
-                 iou_threshold=IOU_THRESHOLD):
+    def __init__(self, max_age=TRACK_MAX_AGE, min_hits=TRACK_MIN_HITS,
+                 iou_threshold=TRACK_IOU):
         self.max_age = max_age
         self.min_hits = min_hits
         self.iou_threshold = iou_threshold

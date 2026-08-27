@@ -26,6 +26,7 @@ from pathlib import Path
 import detector as det
 import frames
 import roistore
+import tracker as trk
 
 HERE = Path(__file__).resolve().parent
 INDEX_FILE = HERE / "index.html"
@@ -34,6 +35,11 @@ PORT = int(os.environ.get("PORT", "8080"))
 AI_FPS = float(os.environ.get("AI_FPS", "4"))
 EVENT_CLASSES = [c.strip() for c in
                  os.environ.get("EVENT_CLASSES", "person").split(",") if c.strip()]
+# ROI 안에 이만큼 계속 머물러야 이벤트를 낸다. 스쳐 지나가는 것과 구분한다.
+DWELL_SEC = float(os.environ.get("DWELL_SEC", "2"))
+# ROI 경계에서 박스가 흔들리면 진입/이탈이 반복돼 같은 사람이 여러 번 잡힌다.
+# 이만큼 계속 벗어나 있어야 "나갔다"로 인정한다.
+EXIT_SEC = float(os.environ.get("EXIT_SEC", "2"))
 
 BOUNDARY = "frame"
 
@@ -50,13 +56,13 @@ class DetectionWorker:
     def __init__(self, pipeline, model):
         self.pipeline = pipeline
         self.model = model
+        self.tracker = trk.IOUTracker()
         self.lock = threading.Lock()
         self.detections = []
         self.roi_hits = {}
         self.infer_ms = 0.0
         self.ai_fps = 0.0
         self.events = deque(maxlen=50)
-        self._active = set()        # 지금 무언가 잡혀 있는 ROI id
         self._stop = threading.Event()
 
     def start(self):
@@ -96,7 +102,9 @@ class DetectionWorker:
                 continue
             infer_ms = (time.perf_counter() - t0) * 1000
 
-            self._match_rois(results)
+            now = time.time()
+            tracks = self.tracker.update(results, now)
+            self._match_rois(tracks, now)
 
             now = time.perf_counter()
             if prev is not None:
@@ -112,37 +120,58 @@ class DetectionWorker:
             if sleep > 0:
                 time.sleep(sleep)
 
-    def _match_rois(self, results):
-        """검출 박스의 발밑(하단 중앙)이 ROI 안에 있으면 그 ROI에 걸린 것으로 본다."""
+    def _match_rois(self, tracks, now):
+        """트랙의 발밑(박스 하단 중앙)이 ROI 안에 있으면 그 ROI에 걸린 것으로 본다.
+
+        트랙 ID가 있으므로 "같은 사람이 계속 있는 것"과 "새로 들어온 것"을 구분할 수
+        있다. 이벤트는 (트랙, ROI) 조합마다 체류 DWELL_SEC를 넘길 때 한 번만 낸다.
+        """
         rois = [r for r in roistore.list_rois()
                 if r["enabled"] and len(r["points"]) >= 3]
+        names = {r["id"]: r["name"] for r in rois}
         hits = {r["id"]: 0 for r in rois}
+        fired = []
 
-        for d in results:
-            x1, y1, x2, y2 = d["box"]
+        for t in tracks:
+            x1, _, x2, y2 = t.box
             foot = ((x1 + x2) / 2, y2)
-            d["roi_ids"] = [r["id"] for r in rois
-                            if roistore.point_in_polygon(*foot, r["points"])]
-            for rid in d["roi_ids"]:
-                hits[rid] += 1
+            inside = {r["id"] for r in rois
+                      if roistore.point_in_polygon(*foot, r["points"])}
+            t.roi_in = inside
 
-        watched = {r["id"]: r["name"] for r in rois}
-        now_active = {rid for rid, n in hits.items()
-                      if n and any(d["name"] in EVENT_CLASSES
-                                   for d in results if rid in d["roi_ids"])}
+            for rid in inside:
+                if rid not in t.roi_since:               # 새로 진입 -> 시각 기록
+                    t.roi_since[rid] = now
+                t.roi_left.pop(rid, None)                # 잠깐 벗어난 건 없던 일로
+
+            for rid in set(t.roi_since) - inside:        # 벗어나 있는 중
+                t.roi_left.setdefault(rid, now)
+                if now - t.roi_left[rid] >= EXIT_SEC:    # 확실히 나감 -> 초기화
+                    del t.roi_since[rid]
+                    del t.roi_left[rid]
+                    t.roi_fired.discard(rid)
+
+            for rid in inside:
+                hits[rid] += 1
+                if (t.name in EVENT_CLASSES and rid not in t.roi_fired
+                        and now - t.roi_since[rid] >= DWELL_SEC):
+                    t.roi_fired.add(rid)
+                    fired.append((t, rid))
+
         with self.lock:
-            self.detections = results
+            self.detections = [t.to_dict(now) for t in tracks]
             self.roi_hits = hits
-            # 비어 있다가 처음 잡힌 순간에만 이벤트를 남긴다 (매 프레임 아님)
-            for rid in now_active - self._active:
+            for t, rid in fired:
                 self.events.appendleft({
                     "ts": time.strftime("%H:%M:%S"),
                     "roi_id": rid,
-                    "roi_name": watched.get(rid, "?"),
-                    "count": hits[rid],
+                    "roi_name": names.get(rid, "?"),
+                    "track_id": t.id,
+                    "name": t.name,
+                    "dwell": round(now - t.roi_since[rid], 1),
                 })
-                print(f"[event] {watched.get(rid)} 진입 ({hits[rid]}건)", flush=True)
-            self._active = now_active
+                print(f"[event] {names.get(rid)} — #{t.id} {t.name} "
+                      f"{DWELL_SEC}초 이상 체류", flush=True)
 
 
 # ---------------------------------------------------------------- HTTP
@@ -229,6 +258,9 @@ class Handler(BaseHTTPRequestHandler):
             "model_input": list(model.size) if model else None,
             "classes": len(model.names) if model else 0,
             "event_classes": EVENT_CLASSES,
+            "tracker": (f"IoU (max_age={trk.MAX_AGE}, min_hits={trk.MIN_HITS}, "
+                        f"iou={trk.IOU_THRESHOLD})"),
+            "dwell_sec": DWELL_SEC,
         }
 
     def serve_index(self):

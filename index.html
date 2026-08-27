@@ -197,7 +197,7 @@ function drawDetections() {
     ctx.strokeStyle = inRoi ? '#FF5A5A' : '#3DDC97';
     ctx.strokeRect(px, py, pw, ph);
 
-    const text = `${d.name} ${(d.conf * 100).toFixed(0)}%`;
+    const text = `#${d.id} ${d.name} ${(d.conf * 100).toFixed(0)}%`;
     const tw = ctx.measureText(text).width + 8;
     ctx.fillStyle = inRoi ? '#FF5A5A' : '#3DDC97';
     ctx.fillRect(px, Math.max(py - 15, 0), tw, 14);
@@ -458,7 +458,8 @@ async function pollEvents() {
     const {events} = await (await fetch('/api/events')).json();
     const el = document.getElementById('events');
     el.innerHTML = events.length
-      ? events.map(e => `<div>${e.ts} <b>${e.roi_name}</b> 진입 (${e.count})</div>`).join('')
+      ? events.map(e => `<div>${e.ts} <b>${e.roi_name}</b> `
+                       + `#${e.track_id} ${e.name} ${e.dwell}초 체류</div>`).join('')
       : '<div>아직 이벤트 없음</div>';
   } catch { /* 무시 */ }
 }

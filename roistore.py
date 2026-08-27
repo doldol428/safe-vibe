@@ -106,7 +106,11 @@ def delete_roi(roi_id):
 # ---------------------------------------------------------------- 판정
 
 def point_in_polygon(x, y, points):
-    """ray casting. vunexai-frontend canvas.ts 의 isPointInPolygon 과 동일."""
+    """ray casting 방식 다각형 내부 판정.
+
+    index.html 의 inPolygon() 과 같은 알고리즘이어야 한다. 서버 판정과 화면
+    표시가 갈리면 "박스는 안에 있는데 이벤트는 안 뜬다"가 된다.
+    """
     inside = False
     n = len(points)
     for i in range(n):

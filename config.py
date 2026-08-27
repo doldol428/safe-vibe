@@ -72,7 +72,7 @@ EXIT_SEC = _float("EXIT_SEC", 2)
 EVENT_LOG_SIZE = _int("EVENT_LOG_SIZE", 50)  # 메모리에 보관할 최근 이벤트 수
 
 # ---------------------------------------------------------------- ROI 제약
-MAX_ROI = _int("MAX_ROI", 10)        # vunexai-frontend 의 MAX_ROI_COUNT 와 동일
+MAX_ROI = _int("MAX_ROI", 10)        # 한 화면에 둘 수 있는 검출 영역 수
 MAX_POINTS = _int("MAX_POINTS", 30)  # 폴리곤 꼭짓점 수 상한
 MAX_NAME = _int("MAX_NAME", 50)      # ROI 이름 길이 상한
 DEFAULT_ROI_NAME = "New Zone"

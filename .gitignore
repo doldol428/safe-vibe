@@ -1,6 +1,3 @@
-# 참고용으로 클론한 별도 저장소
-vunexai-frontend/
-
 # 영상 원본
 *.mp4
 
@@ -15,4 +12,3 @@ model/*.pt
 # 파이썬 캐시
 __pycache__/
 *.pyc
-vunexai-core/

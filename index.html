@@ -5,8 +5,8 @@
 <title>safe_video1 — ROI 설정</title>
 <style>
   :root {
-    --zone: #FFCC00;          /* vunexai ROI_ZONE_COLOR */
-    --zone-hl: #FEDB25;       /* HIGHLIGHT_COLOR */
+    --zone: #FFCC00;          /* ROI 영역 */
+    --zone-hl: #FEDB25;       /* 선택/hover 강조 */
     --det: #3DDC97;           /* 검출 박스 */
     --alert: #FF5A5A;         /* ROI에 걸린 상태 */
     --bg: #171719; --panel: #1f1f22; --fill: #2a2a2e; --fill-strong: #37373d;
@@ -139,7 +139,7 @@ const mouseAt = e => {
   return {px: e.clientX - b.left, py: e.clientY - b.top};
 };
 
-// vunexai canvas.ts 의 isPointInPolygon 과 동일한 ray casting
+// ray casting. roistore.py 의 point_in_polygon() 과 판정이 일치해야 한다.
 function inPolygon(x, y, pts) {
   let inside = false;
   for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {

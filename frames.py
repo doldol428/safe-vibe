@@ -17,6 +17,8 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+VIDEO_DIR = Path(os.environ.get(
+    "VIDEO_DIR", Path(__file__).resolve().parent / "video"))
 CAPTURE_W = int(os.environ.get("CAPTURE_W", "1280"))
 CAPTURE_H = int(os.environ.get("CAPTURE_H", "720"))
 STREAM_FPS = float(os.environ.get("STREAM_FPS", "15"))
@@ -24,6 +26,25 @@ JPEG_QUALITY = int(os.environ.get("JPEG_QUALITY", "75"))
 # 송출용 가로 해상도. AI는 캡처 원본을 쓰고 브라우저에만 축소본을 보낸다.
 # 0이면 캡처 해상도 그대로. 720p q75는 약 20Mbps, 960 폭은 약 12Mbps.
 STREAM_W = int(os.environ.get("STREAM_W", "960"))
+
+
+class NoVideoError(RuntimeError):
+    pass
+
+
+def find_video(video_dir=VIDEO_DIR):
+    """video/ 에 mp4 하나만 둔다 — model/ 의 단일 onnx 규칙과 같은 방식."""
+    video_dir = Path(video_dir)
+    if not video_dir.is_dir():
+        raise NoVideoError(f"영상 디렉터리가 없습니다: {video_dir}")
+    found = sorted(video_dir.glob("*.mp4"))
+    if not found:
+        raise NoVideoError(f"{video_dir} 에 .mp4 파일이 없습니다")
+    if len(found) > 1:
+        raise NoVideoError(
+            f"{video_dir} 에 .mp4가 여러 개입니다(단일 영상만 지원): "
+            + ", ".join(f.name for f in found))
+    return found[0]
 
 
 class FrameSource:
@@ -121,7 +142,8 @@ def open_source(video=None, kind=None):
             kind = "video"
     if kind == "picamera":
         return PicameraSource(), "picamera2"
-    return FfmpegSource(video), f"ffmpeg:{Path(video).name}"
+    video = Path(video) if video else find_video()
+    return FfmpegSource(video), f"ffmpeg:{video.name}"
 
 
 # ---------------------------------------------------------------- 송출

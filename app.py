@@ -29,7 +29,7 @@ import roistore
 
 HERE = Path(__file__).resolve().parent
 INDEX_FILE = HERE / "index.html"
-VIDEO = Path(os.environ.get("VIDEO", HERE / "safe_video1.mp4"))
+VIDEO = os.environ.get("VIDEO")     # 비우면 video/ 의 단일 mp4를 찾는다
 PORT = int(os.environ.get("PORT", "8080"))
 AI_FPS = float(os.environ.get("AI_FPS", "4"))
 EVENT_CLASSES = [c.strip() for c in
@@ -268,7 +268,10 @@ class Handler(BaseHTTPRequestHandler):
 # ---------------------------------------------------------------- 시작
 
 def main():
-    source, source_name = frames.open_source(VIDEO)
+    try:
+        source, source_name = frames.open_source(VIDEO)
+    except (frames.NoVideoError, RuntimeError) as e:
+        raise SystemExit(f"프레임 소스를 열 수 없습니다: {e}")
     pipeline = frames.Pipeline(source).start()
 
     try:

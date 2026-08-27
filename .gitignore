@@ -1,0 +1,9 @@
+# 참고용으로 클론한 별도 저장소
+vunexai-frontend/
+
+# 영상 원본
+*.mp4
+
+# 실행 중 생성되는 ROI 설정
+roi.json
+roi.json.*.tmp

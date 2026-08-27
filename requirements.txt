@@ -1,0 +1,7 @@
+numpy
+opencv-python-headless
+onnxruntime
+
+# 라즈베리파이에서는 아래를 apt로 설치한다 (pip 빌드가 오래 걸림):
+#   sudo apt install -y python3-picamera2 python3-opencv python3-numpy
+#   pip install onnxruntime

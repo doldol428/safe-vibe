@@ -1,147 +1,148 @@
-"""safe_video1.mp4 -> MJPEG 스트리밍 + ROI(검출 영역) 관리. 표준 라이브러리만 사용.
+"""안전모 감시 데모 — 프레임 소스 하나에서 AI 추론과 MJPEG 송출을 분리한다.
 
-ROI 모델은 vunexai-frontend 와 동일하게 "이름 붙은 폴리곤 목록"이다.
-좌표는 0~1 정규화라 해상도가 바뀌어도 그대로 쓸 수 있고, 저장소는 roi.json 한 개다.
+    FrameSource (Picamera2 / ffmpeg)
+            |
+        BGR Frame
+        /        \\
+    AI 추론      JPEG 인코딩
+       |              |
+    ROI 대조        MJPEG HTTP
+       |              |
+    이벤트          Browser
+
+AI는 raw 프레임을 그대로 쓰고, 웹 송출용 JPEG는 따로 만든다.
+MJPEG을 다시 디코드해서 추론에 쓰는 낭비가 없다.
 """
 import json
 import os
 import re
-import shutil
 import socket
-import subprocess
 import threading
+import time
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import detector as det
+import frames
+import roistore
+
 HERE = Path(__file__).resolve().parent
-
-VIDEO = Path(os.environ.get("VIDEO", HERE / "safe_video1.mp4"))
 INDEX_FILE = HERE / "index.html"
-ROI_FILE = Path(os.environ.get("ROI_FILE", HERE / "roi.json"))
+VIDEO = Path(os.environ.get("VIDEO", HERE / "safe_video1.mp4"))
 PORT = int(os.environ.get("PORT", "8080"))
-FPS = os.environ.get("FPS", "15")
-QUALITY = os.environ.get("QUALITY", "5")   # ffmpeg -q:v: 2(최상) ~ 31(최하)
-WIDTH = os.environ.get("WIDTH", "")        # 예: "1280" 으로 축소, 빈 값이면 원본
+AI_FPS = float(os.environ.get("AI_FPS", "4"))
+EVENT_CLASSES = [c.strip() for c in
+                 os.environ.get("EVENT_CLASSES", "person").split(",") if c.strip()]
 
-# ffmpeg의 mpjpeg 머서가 multipart 경계를 직접 만들어주므로 파이썬은 바이트만 중계한다.
-BOUNDARY = "ffmpeg"
-
-MAX_ROI = 10        # vunexai-frontend 의 MAX_ROI_COUNT 와 동일
-MAX_POINTS = 30
-MAX_NAME = 50
-DEFAULT_NAME = "New Zone"
-
-_lock = threading.Lock()
+BOUNDARY = "frame"
 
 
-# ---------------------------------------------------------------- ROI 파일 I/O
+# ---------------------------------------------------------------- 추론 워커
 
-def _clean_points(raw):
-    """좌표 배열을 0~1 범위로 정규화한다. 형식이 틀린 점은 버린다."""
-    points = []
-    for p in raw if isinstance(raw, list) else []:
-        try:
-            x, y = float(p["x"]), float(p["y"])
-        except (TypeError, KeyError, ValueError):
-            continue
-        points.append({"x": round(min(max(x, 0.0), 1.0), 6),
-                       "y": round(min(max(y, 0.0), 1.0), 6)})
-        if len(points) >= MAX_POINTS:
-            break
-    return points
+class DetectionWorker:
+    """AI_FPS 로 최신 프레임을 샘플링해 추론하고, ROI와 대조해 이벤트를 낸다.
 
+    송출 FPS와 추론 FPS를 분리해서, 화면은 부드럽게 두고 CPU는 추론에 필요한
+    만큼만 쓴다. (Pi 5 CPU-only 기준 AI 3~5fps / 화면 10~15fps 권장)
+    """
 
-def _clean_roi(raw, roi_id):
-    name = str(raw.get("name") or DEFAULT_NAME)[:MAX_NAME]
-    return {
-        "id": roi_id,
-        "name": name,
-        "enabled": bool(raw.get("enabled", True)),
-        "points": _clean_points(raw.get("points")),
-    }
+    def __init__(self, pipeline, model):
+        self.pipeline = pipeline
+        self.model = model
+        self.lock = threading.Lock()
+        self.detections = []
+        self.roi_hits = {}
+        self.infer_ms = 0.0
+        self.ai_fps = 0.0
+        self.events = deque(maxlen=50)
+        self._active = set()        # 지금 무언가 잡혀 있는 ROI id
+        self._stop = threading.Event()
 
+    def start(self):
+        threading.Thread(target=self._loop, daemon=True).start()
+        return self
 
-def load_store():
-    """파일이 없거나 깨졌으면 빈 목록으로 시작한다 (예외 없음)."""
-    try:
-        raw = json.loads(ROI_FILE.read_text(encoding="utf-8"))
-        rois = [_clean_roi(r, int(r["id"])) for r in raw["rois"]][:MAX_ROI]
-    except (FileNotFoundError, json.JSONDecodeError, UnicodeDecodeError,
-            KeyError, TypeError, ValueError):
-        return {"rois": [], "next_id": 1}
-    next_id = max([r["id"] for r in rois], default=0) + 1
-    return {"rois": rois, "next_id": max(int(raw.get("next_id", 1)), next_id)}
+    def snapshot(self):
+        with self.lock:
+            return {
+                "detections": list(self.detections),
+                "roi_hits": dict(self.roi_hits),
+                "infer_ms": round(self.infer_ms, 1),
+                "ai_fps": self.ai_fps,
+            }
 
+    def event_list(self):
+        with self.lock:
+            return list(self.events)
 
-def save_store(store):
-    """임시 파일에 쓴 뒤 원자적으로 교체 — 중간에 죽어도 반쪽 파일이 남지 않는다."""
-    tmp = ROI_FILE.with_name(ROI_FILE.name + f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(store, ensure_ascii=False, indent=2) + "\n",
-                   encoding="utf-8")
-    tmp.replace(ROI_FILE)   # 같은 디렉터리 내 교체는 Windows/POSIX 모두 원자적
-
-
-# ---------------------------------------------------------------- ROI CRUD
-
-def list_rois():
-    return load_store()["rois"]
-
-
-def create_roi(body):
-    with _lock:
-        store = load_store()
-        if len(store["rois"]) >= MAX_ROI:
-            return None, f"ROI는 최대 {MAX_ROI}개까지입니다"
-        roi = _clean_roi(body, store["next_id"])
-        store["rois"].append(roi)
-        store["next_id"] += 1
-        save_store(store)
-        return roi, None
-
-
-def update_roi(roi_id, body):
-    """전달된 필드만 갱신한다 (부분 수정)."""
-    with _lock:
-        store = load_store()
-        for i, roi in enumerate(store["rois"]):
-            if roi["id"] != roi_id:
+    def _loop(self):
+        interval = 1.0 / AI_FPS if AI_FPS > 0 else 0.25
+        last_seq, ema, prev = -1, None, None
+        while not self._stop.is_set():
+            started = time.perf_counter()
+            frame, seq = self.pipeline.latest()
+            if frame is None or seq == last_seq:
+                time.sleep(0.01)        # 아직 새 프레임이 없음
                 continue
-            merged = {**roi, **{k: body[k] for k in ("name", "enabled", "points")
-                                if k in body}}
-            store["rois"][i] = _clean_roi(merged, roi_id)
-            save_store(store)
-            return store["rois"][i], None
-        return None, "해당 ROI 없음"
+            last_seq = seq
 
+            t0 = time.perf_counter()
+            try:
+                results = self.model.infer(frame)
+            except Exception as e:      # 추론이 실패해도 송출은 계속되어야 한다
+                print(f"[detect] 추론 실패: {e}", flush=True)
+                time.sleep(0.5)
+                continue
+            infer_ms = (time.perf_counter() - t0) * 1000
 
-def delete_roi(roi_id):
-    with _lock:
-        store = load_store()
-        remaining = [r for r in store["rois"] if r["id"] != roi_id]
-        if len(remaining) == len(store["rois"]):
-            return False
-        store["rois"] = remaining
-        save_store(store)
-        return True
+            self._match_rois(results)
 
+            now = time.perf_counter()
+            if prev is not None:
+                dt = now - prev
+                ema = dt if ema is None else ema * 0.8 + dt * 0.2
+                with self.lock:
+                    self.ai_fps = round(1 / ema, 1) if ema > 0 else 0.0
+            prev = now
+            with self.lock:
+                self.infer_ms = infer_ms
 
-# ---------------------------------------------------------------- ffmpeg
+            sleep = interval - (time.perf_counter() - started)
+            if sleep > 0:
+                time.sleep(sleep)
 
-def ffmpeg_cmd():
-    # ROI는 브라우저 캔버스에 오버레이로 그리므로 스트림 자체는 손대지 않는다.
-    # 덕분에 ROI를 편집해도 ffmpeg를 다시 띄울 필요가 없다.
-    vf = ["-vf", f"scale={WIDTH}:-2"] if WIDTH else []
-    return [
-        "ffmpeg", "-hide_banner", "-loglevel", "error",
-        "-stream_loop", "-1",   # 무한 반복
-        "-re",                  # 실시간 속도로 재생
-        "-i", str(VIDEO),
-        "-an",
-        "-r", FPS,
-        *vf,
-        "-q:v", QUALITY,
-        "-f", "mpjpeg", "pipe:1",
-    ]
+    def _match_rois(self, results):
+        """검출 박스의 발밑(하단 중앙)이 ROI 안에 있으면 그 ROI에 걸린 것으로 본다."""
+        rois = [r for r in roistore.list_rois()
+                if r["enabled"] and len(r["points"]) >= 3]
+        hits = {r["id"]: 0 for r in rois}
+
+        for d in results:
+            x1, y1, x2, y2 = d["box"]
+            foot = ((x1 + x2) / 2, y2)
+            d["roi_ids"] = [r["id"] for r in rois
+                            if roistore.point_in_polygon(*foot, r["points"])]
+            for rid in d["roi_ids"]:
+                hits[rid] += 1
+
+        watched = {r["id"]: r["name"] for r in rois}
+        now_active = {rid for rid, n in hits.items()
+                      if n and any(d["name"] in EVENT_CLASSES
+                                   for d in results if rid in d["roi_ids"])}
+        with self.lock:
+            self.detections = results
+            self.roi_hits = hits
+            # 비어 있다가 처음 잡힌 순간에만 이벤트를 남긴다 (매 프레임 아님)
+            for rid in now_active - self._active:
+                self.events.appendleft({
+                    "ts": time.strftime("%H:%M:%S"),
+                    "roi_id": rid,
+                    "roi_name": watched.get(rid, "?"),
+                    "count": hits[rid],
+                })
+                print(f"[event] {watched.get(rid)} 진입 ({hits[rid]}건)", flush=True)
+            self._active = now_active
 
 
 # ---------------------------------------------------------------- HTTP
@@ -152,6 +153,10 @@ ROI_ID_PATH = re.compile(r"^/api/rois/(\d+)$")
 class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.0"
     disable_nagle_algorithm = True   # 작은 JSON 응답이 지연되지 않도록 TCP_NODELAY
+
+    pipeline = None      # main 에서 주입
+    worker = None
+    source_name = ""
 
     def _json(self, obj, status=200):
         body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -169,17 +174,18 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.startswith("/stream.mjpg"):
             self.stream()
         elif self.path == "/api/rois":
-            self._json({"rois": list_rois(), "max": MAX_ROI})
+            self._json({"rois": roistore.list_rois(), "max": roistore.MAX_ROI})
+        elif self.path == "/api/detections":
+            snap = self.worker.snapshot() if self.worker else {
+                "detections": [], "roi_hits": {}, "infer_ms": 0, "ai_fps": 0}
+            snap["fps"] = self.pipeline.fps
+            self._json(snap)
+        elif self.path == "/api/events":
+            self._json({"events": self.worker.event_list() if self.worker else []})
+        elif self.path == "/api/status":
+            self._json(self.status())
         elif self.path in ("/", "/index.html"):
-            try:
-                body = INDEX_FILE.read_bytes()
-            except FileNotFoundError:
-                return self.send_error(500, "index.html not found")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self.serve_index()
         else:
             self.send_error(404)
 
@@ -187,7 +193,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path != "/api/rois":
             return self.send_error(404)
         try:
-            roi, err = create_roi(self._body())
+            roi, err = roistore.create_roi(self._body())
         except (ValueError, json.JSONDecodeError):
             return self.send_error(400, "invalid json")
         self._json({"error": err} if err else roi, 409 if err else 201)
@@ -197,7 +203,7 @@ class Handler(BaseHTTPRequestHandler):
         if not m:
             return self.send_error(404)
         try:
-            roi, err = update_roi(int(m.group(1)), self._body())
+            roi, err = roistore.update_roi(int(m.group(1)), self._body())
         except (ValueError, json.JSONDecodeError):
             return self.send_error(400, "invalid json")
         self._json({"error": err} if err else roi, 404 if err else 200)
@@ -206,43 +212,74 @@ class Handler(BaseHTTPRequestHandler):
         m = ROI_ID_PATH.match(self.path)
         if not m:
             return self.send_error(404)
-        if not delete_roi(int(m.group(1))):
+        if not roistore.delete_roi(int(m.group(1))):
             return self.send_error(404, "no such roi")
         self._json({"deleted": int(m.group(1))})
 
-    def stream(self):
-        proc = subprocess.Popen(ffmpeg_cmd(), stdout=subprocess.PIPE, bufsize=0)
+    def status(self):
+        model = self.worker.model if self.worker else None
+        return {
+            "source": self.source_name,
+            "capture": [frames.CAPTURE_W, frames.CAPTURE_H],
+            "stream_fps": frames.STREAM_FPS,
+            "ai_fps_target": AI_FPS,
+            "model": model.path.name if model else None,
+            "model_input": list(model.size) if model else None,
+            "classes": len(model.names) if model else 0,
+            "event_classes": EVENT_CLASSES,
+        }
+
+    def serve_index(self):
         try:
-            self.send_response(200)
-            self.send_header("Age", "0")
-            self.send_header("Cache-Control", "no-cache, private")
-            self.send_header("Pragma", "no-cache")
-            self.send_header("Content-Type",
-                             f"multipart/x-mixed-replace; boundary={BOUNDARY}")
-            self.end_headers()
-            while True:
-                chunk = proc.stdout.read(65536)
-                if not chunk:
-                    break
-                self.wfile.write(chunk)
+            body = INDEX_FILE.read_bytes()
+        except FileNotFoundError:
+            return self.send_error(500, "index.html not found")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def stream(self):
+        """공유 파이프라인이 만든 JPEG를 multipart로 흘려보낸다."""
+        self.send_response(200)
+        self.send_header("Age", "0")
+        self.send_header("Cache-Control", "no-cache, private")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Content-Type",
+                         f"multipart/x-mixed-replace; boundary={BOUNDARY}")
+        self.end_headers()
+        try:
+            for jpeg in self.pipeline.hub.stream():
+                self.wfile.write(
+                    f"--{BOUNDARY}\r\nContent-Type: image/jpeg\r\n"
+                    f"Content-Length: {len(jpeg)}\r\n\r\n".encode())
+                self.wfile.write(jpeg)
+                self.wfile.write(b"\r\n")
         except (BrokenPipeError, ConnectionResetError):
             pass  # 클라이언트가 탭을 닫음
-        finally:
-            proc.terminate()      # 접속 1개당 ffmpeg 1개, 끊기면 같이 종료
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
 
     def log_message(self, fmt, *args):
         pass
 
 
-if __name__ == "__main__":
-    if not shutil.which("ffmpeg"):
-        raise SystemExit("ffmpeg를 PATH에서 찾을 수 없습니다")
-    if not VIDEO.exists():
-        raise SystemExit(f"영상 파일 없음: {VIDEO}")
+# ---------------------------------------------------------------- 시작
+
+def main():
+    source, source_name = frames.open_source(VIDEO)
+    pipeline = frames.Pipeline(source).start()
+
+    try:
+        model = det.Detector()
+        worker = DetectionWorker(pipeline, model).start()
+        print(f"model : {model.path.name} "
+              f"({model.task}, {len(model.names)}클래스, 입력 {model.size[0]}x{model.size[1]})",
+              flush=True)
+    except det.NoModelError as e:
+        model, worker = None, None
+        print(f"model : 없음 — 검출 비활성 ({e})", flush=True)
+
+    Handler.pipeline, Handler.worker, Handler.source_name = pipeline, worker, source_name
 
     # Windows에서는 SO_REUSEADDR 때문에 두 번째 인스턴스가 같은 포트에
     # 조용히 바인딩된다. 꺼두면 중복 실행 시 바로 에러가 난다.
@@ -260,8 +297,10 @@ if __name__ == "__main__":
             self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
             super().server_bind()
 
-    print(f"serving http://localhost:{PORT}  (stream: /stream.mjpg)", flush=True)
-    print(f"roi file: {ROI_FILE}  ->  {len(list_rois())} ROI", flush=True)
+    print(f"source: {source_name} @ {frames.CAPTURE_W}x{frames.CAPTURE_H} "
+          f"{frames.STREAM_FPS}fps (AI {AI_FPS}fps)", flush=True)
+    print(f"roi   : {roistore.ROI_FILE} -> {len(roistore.list_rois())} ROI", flush=True)
+    print(f"serving http://localhost:{PORT}", flush=True)
     try:
         # OSError를 잡아서 폴백하면 "포트 사용 중" 에러까지 삼켜버리므로,
         # IPv6 지원 여부는 미리 물어보고 고른다.
@@ -273,3 +312,9 @@ if __name__ == "__main__":
         raise SystemExit(f"포트 {PORT} 바인딩 실패 (이미 실행 중?): {e}")
     except KeyboardInterrupt:
         pass
+    finally:
+        pipeline.stop()
+
+
+if __name__ == "__main__":
+    main()

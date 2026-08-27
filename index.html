@@ -7,6 +7,8 @@
   :root {
     --zone: #FFCC00;          /* vunexai ROI_ZONE_COLOR */
     --zone-hl: #FEDB25;       /* HIGHLIGHT_COLOR */
+    --det: #3DDC97;           /* 검출 박스 */
+    --alert: #FF5A5A;         /* ROI에 걸린 상태 */
     --bg: #171719; --panel: #1f1f22; --fill: #2a2a2e; --fill-strong: #37373d;
     --label: #e8e8ea; --label-dim: #9a9aa0; --line: #333338;
   }
@@ -57,6 +59,18 @@
   #done { background: var(--zone); color: #17171a; font-weight: 600; }
   #done:hover { background: var(--zone-hl); }
   #empty { color: var(--label-dim); font-size: 13px; text-align: center; padding: 20px 0; }
+
+  .item .hit { flex: none; font-size: 11px; font-weight: 600; padding: 1px 6px;
+               border-radius: 8px; background: var(--alert); color: #17171a; }
+  #status { border-top: 1px solid var(--line); padding-top: 10px;
+            display: flex; flex-wrap: wrap; gap: 4px 12px;
+            color: var(--label-dim); font-size: 11px; }
+  #status b { color: var(--label); font-weight: 600; }
+  #events { max-height: 128px; overflow-y: auto; display: flex;
+            flex-direction: column; gap: 3px; }
+  #events div { font-size: 11px; color: var(--label-dim); }
+  #events b { color: var(--alert); font-weight: 600; }
+  h2 { font-size: 12px; margin: 0; color: var(--label-dim); font-weight: 600; }
 </style>
 </head>
 <body>
@@ -76,6 +90,9 @@
     <button id="done" hidden>완료</button>
   </header>
   <div id="list"></div>
+  <h2>이벤트</h2>
+  <div id="events"></div>
+  <div id="status"></div>
 </aside>
 
 <script>
@@ -86,6 +103,7 @@ const ctx = cv.getContext('2d');
 const $list = document.getElementById('list');
 
 let rois = [], max = 10;
+let dets = [], roiHits = {};   // 서버 추론 결과 (폴링)
 let selId = null;      // 편집 중인 ROI
 let draftId = null;    // 방금 추가해서 아직 영역을 다 그리지 않은 ROI
 let hoverId = null;    // 마우스가 올라간 ROI
@@ -131,8 +149,10 @@ function resize() {
 
 function draw() {
   ctx.clearRect(0, 0, cv.clientWidth, cv.clientHeight);
+  drawDetections();
   for (const roi of rois) {
     const sel = roi.id === selId, hl = roi.id === hoverId;
+    const hit = roiHits[roi.id] > 0;
     const pts = roi.points.map(toPx);
     if (!pts.length) continue;
 
@@ -142,11 +162,12 @@ function draw() {
     pts.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
     if (pts.length > 2) {
       ctx.closePath();
-      ctx.fillStyle = hl ? 'rgba(254,219,37,.32)' : 'rgba(255,204,0,.08)';
+      ctx.fillStyle = hit ? 'rgba(255,90,90,.22)'
+                    : hl  ? 'rgba(254,219,37,.32)' : 'rgba(255,204,0,.08)';
       ctx.fill();
     }
-    ctx.strokeStyle = sel || hl ? '#FEDB25' : '#FFCC00';
-    ctx.lineWidth = sel ? 2 : 1;
+    ctx.strokeStyle = hit ? '#FF5A5A' : (sel || hl ? '#FEDB25' : '#FFCC00');
+    ctx.lineWidth = sel || hit ? 2 : 1;
     ctx.stroke();
 
     if (sel) {   // 편집 중일 때만 꼭짓점 핸들 표시
@@ -162,6 +183,26 @@ function draw() {
       label(roi.name, pts[0]);
     }
     ctx.globalAlpha = 1;
+  }
+}
+
+function drawDetections() {
+  const W = cv.clientWidth, H = cv.clientHeight;
+  ctx.font = '11px system-ui, sans-serif';
+  ctx.lineWidth = 2;
+  for (const d of dets) {
+    const [x1, y1, x2, y2] = d.box;
+    const px = x1 * W, py = y1 * H, pw = (x2 - x1) * W, ph = (y2 - y1) * H;
+    const inRoi = d.roi_ids && d.roi_ids.length;
+    ctx.strokeStyle = inRoi ? '#FF5A5A' : '#3DDC97';
+    ctx.strokeRect(px, py, pw, ph);
+
+    const text = `${d.name} ${(d.conf * 100).toFixed(0)}%`;
+    const tw = ctx.measureText(text).width + 8;
+    ctx.fillStyle = inRoi ? '#FF5A5A' : '#3DDC97';
+    ctx.fillRect(px, Math.max(py - 15, 0), tw, 14);
+    ctx.fillStyle = '#17171a';
+    ctx.fillText(text, px + 4, Math.max(py - 15, 0) + 10.5);
   }
 }
 
@@ -240,6 +281,14 @@ function render() {
       pts.className = 'pts';
       pts.textContent = `${roi.points.length}점`;
       el.append(name, pts);
+    }
+
+    if (roiHits[roi.id] > 0) {
+      const hit = document.createElement('span');
+      hit.className = 'hit';
+      hit.textContent = roiHits[roi.id];
+      hit.title = '이 영역에서 검출된 개수';
+      el.append(hit);
     }
 
     const rename = document.createElement('button');
@@ -377,11 +426,51 @@ document.addEventListener('keydown', e => {
   if (e.key === 'Escape' || e.key === 'Enter') finish();
 });
 
+// ---------------------------------------------------------------- 추론 결과 폴링
+// 검출 결과는 서버가 별도 스레드에서 만들고, 화면은 캔버스에 겹쳐 그리기만 한다.
+// MJPEG 스트림 자체에는 손대지 않으므로 송출 FPS와 추론 FPS가 서로 독립적이다.
+let cfg = {};
+
+async function poll() {
+  try {
+    const d = await (await fetch('/api/detections')).json();
+    const hitsChanged = JSON.stringify(d.roi_hits) !== JSON.stringify(roiHits);
+    dets = d.detections;
+    roiHits = d.roi_hits;
+    if (hitsChanged) render();          // 목록의 검출 배지 갱신
+    draw();
+    showStatus(d);
+  } catch { /* 서버 재시작 중 — 다음 주기에 다시 시도 */ }
+}
+
+function showStatus(d) {
+  const el = document.getElementById('status');
+  el.innerHTML =
+      `<span>송출 <b>${d.fps ?? '-'}</b> fps</span>`
+    + `<span>추론 <b>${d.ai_fps ?? '-'}</b> fps</span>`
+    + `<span>지연 <b>${d.infer_ms ?? '-'}</b> ms</span>`
+    + `<span>검출 <b>${dets.length}</b></span>`
+    + (cfg.model ? `<span>${cfg.source} · ${cfg.model}</span>` : '');
+}
+
+async function pollEvents() {
+  try {
+    const {events} = await (await fetch('/api/events')).json();
+    const el = document.getElementById('events');
+    el.innerHTML = events.length
+      ? events.map(e => `<div>${e.ts} <b>${e.roi_name}</b> 진입 (${e.count})</div>`).join('')
+      : '<div>아직 이벤트 없음</div>';
+  } catch { /* 무시 */ }
+}
+
 // ---------------------------------------------------------------- 시작
 new ResizeObserver(resize).observe(img);
 img.onload = resize;
 img.src = '/stream.mjpg?t=' + Date.now();
 reload();
+fetch('/api/status').then(r => r.json()).then(s => { cfg = s; });
+setInterval(poll, 200);
+setInterval(pollEvents, 1000);
 </script>
 </body>
 </html>

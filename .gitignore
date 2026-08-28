@@ -12,3 +12,5 @@ model/*.pt
 # 파이썬 캐시
 __pycache__/
 *.pyc
+
+*.pptx

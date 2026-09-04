@@ -22,3 +22,5 @@ __pycache__/
 *.pyc
 
 *.pptx
+# Arduino 클라이언트의 WiFi 자격증명 (arduino_secrets.h.example 을 복사해서 만든다)
+safe-vibe-client/arduino_secrets.h

@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import config as cfg
 import detector as det
 import frames
+import mqttpub
 import roistore
 import tracker as trk
 
@@ -39,9 +40,10 @@ class DetectionWorker:
     만큼만 쓴다. (Pi 5 CPU-only 기준 AI 3~5fps / 화면 10~15fps 권장)
     """
 
-    def __init__(self, pipeline, model):
+    def __init__(self, pipeline, model, publisher):
         self.pipeline = pipeline
         self.model = model
+        self.publisher = publisher
         self.tracker = trk.IOUTracker()
         self.lock = threading.Lock()
         self.detections = []
@@ -140,20 +142,28 @@ class DetectionWorker:
                     t.roi_fired.add(rid)
                     fired.append((t, rid))
 
+        new_events = []
         with self.lock:
             self.detections = [t.to_dict(now) for t in tracks]
             self.roi_hits = hits
             for t, rid in fired:
-                self.events.appendleft({
+                event = {
                     "ts": time.strftime("%H:%M:%S"),
                     "roi_id": rid,
                     "roi_name": names.get(rid, "?"),
                     "track_id": t.id,
                     "name": t.name,
                     "dwell": round(now - t.roi_since[rid], 1),
-                })
-                print(f"[event] {names.get(rid)} — #{t.id} {t.name} "
-                      f"{cfg.DWELL_SEC}초 이상 체류", flush=True)
+                }
+                self.events.appendleft(event)
+                new_events.append(event)
+
+        # 로그와 발행은 락을 놓고 한다. 브로커가 느릴 때 그 지연이 lock 을 붙들면
+        # /api/detections 응답까지 같이 밀린다.
+        for event in new_events:
+            print(f"[event] {event['roi_name']} — #{event['track_id']} {event['name']} "
+                  f"{cfg.DWELL_SEC}초 이상 체류", flush=True)
+            self.publisher.publish(event)
 
 
 # ---------------------------------------------------------------- HTTP
@@ -167,6 +177,7 @@ class Handler(BaseHTTPRequestHandler):
 
     pipeline = None      # main 에서 주입
     worker = None
+    publisher = None
     source_name = ""
 
     def _json(self, obj, status=200):
@@ -243,6 +254,7 @@ class Handler(BaseHTTPRequestHandler):
             "tracker": (f"IoU (max_age={cfg.TRACK_MAX_AGE}, min_hits={cfg.TRACK_MIN_HITS}, "
                         f"iou={cfg.TRACK_IOU})"),
             "dwell_sec": cfg.DWELL_SEC,
+            "mqtt": self.publisher.status() if self.publisher else {"enabled": False},
         }
 
     def serve_index(self):
@@ -290,9 +302,13 @@ def main():
         raise SystemExit(f"프레임 소스를 열 수 없습니다: {e}")
     pipeline = frames.Pipeline(source).start()
 
+    publisher = mqttpub.Publisher(cfg.MQTT_HOST, cfg.MQTT_PORT, cfg.MQTT_TOPIC,
+                                  qos=cfg.MQTT_QOS,
+                                  client_id=cfg.MQTT_CLIENT_ID).start()
+
     try:
         model = det.Detector()
-        worker = DetectionWorker(pipeline, model).start()
+        worker = DetectionWorker(pipeline, model, publisher).start()
         print(f"model : {model.path.name} "
               f"({model.task}, {len(model.names)}클래스, 입력 {model.size[0]}x{model.size[1]})",
               flush=True)
@@ -301,6 +317,7 @@ def main():
         print(f"model : 없음 — 검출 비활성 ({e})", flush=True)
 
     Handler.pipeline, Handler.worker, Handler.source_name = pipeline, worker, source_name
+    Handler.publisher = publisher
 
     # Windows에서는 SO_REUSEADDR 때문에 두 번째 인스턴스가 같은 포트에
     # 조용히 바인딩된다. 꺼두면 중복 실행 시 바로 에러가 난다.
@@ -335,6 +352,7 @@ def main():
         pass
     finally:
         pipeline.stop()
+        publisher.stop()
 
 
 if __name__ == "__main__":

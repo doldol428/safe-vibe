@@ -71,6 +71,18 @@ DWELL_SEC = _float("DWELL_SEC", 2)
 EXIT_SEC = _float("EXIT_SEC", 2)
 EVENT_LOG_SIZE = _int("EVENT_LOG_SIZE", 50)  # 메모리에 보관할 최근 이벤트 수
 
+# ---------------------------------------------------------------- MQTT
+# 이벤트를 외부로 내보낸다. 기본값은 같은 장비의 브로커(mosquitto)다.
+# 브로커가 없어도 앱은 그대로 돈다 — 연결만 계속 재시도하고 이벤트는 버린다.
+# 다른 브로커로 보내려면 MQTT_HOST=192.168.0.10, 아예 끄려면 MQTT_HOST= (빈 값).
+MQTT_HOST = os.environ.get("MQTT_HOST", "127.0.0.1")
+MQTT_PORT = _int("MQTT_PORT", 1883)
+MQTT_TOPIC = os.environ.get("MQTT_TOPIC", "safe-vibe/alert")
+# QoS 1 = "적어도 한 번". 경보는 유실보다 중복이 낫다. 받는 쪽에서 track_id 로
+# 중복을 걸러낼 수 있다.
+MQTT_QOS = _int("MQTT_QOS", 1)
+MQTT_CLIENT_ID = os.environ.get("MQTT_CLIENT_ID", "")   # 비우면 브로커가 생성
+
 # ---------------------------------------------------------------- ROI 제약
 MAX_ROI = _int("MAX_ROI", 10)        # 한 화면에 둘 수 있는 검출 영역 수
 MAX_POINTS = _int("MAX_POINTS", 30)  # 폴리곤 꼭짓점 수 상한

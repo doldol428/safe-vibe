@@ -10,6 +10,11 @@ onnxruntime
 # ultralytics 같은 패키지를 설치하면 opencv-python이 딸려 들어오므로 주의.
 opencv-python-headless
 
+# 이벤트 MQTT 발행용 클라이언트. 브로커(mosquitto 등)는 별도로 띄운다.
+# MQTT_HOST 가 비어 있으면 연동을 끄므로, 안 쓸 거면 이 줄을 빼도 앱은 돈다.
+#   Pi 에서는 apt 쪽이 1.x 일 수 있는데 mqttpub.py 가 1.x/2.x 를 모두 받는다.
+paho-mqtt
+
 # 라즈베리파이에서는 아래를 apt로 설치한다 (pip 빌드가 오래 걸림):
 #   sudo apt install -y python3-picamera2 python3-opencv python3-numpy
 #   pip install onnxruntime

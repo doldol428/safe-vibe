@@ -5,9 +5,10 @@
         └─ JPEG 인코딩 -> MJPEG 송출 (FrameHub 가 접속자 전원에게 fan-out)
 
 AI용 raw 프레임과 모니터링용 JPEG를 분리해서, MJPEG을 다시 디코드하는 낭비가 없다.
-카메라가 바뀌어도(FfmpegSource <-> PicameraSource) 위쪽 코드는 손대지 않는다.
+카메라가 바뀌어도(FfmpegSource / PicameraSource / WebcamSource) 위쪽 코드는 손대지 않는다.
 """
 import os
+import platform
 import shutil
 import subprocess
 import threading
@@ -19,7 +20,7 @@ import cv2
 import numpy as np
 
 from config import (CAPTURE_H, CAPTURE_W, JPEG_QUALITY, SOURCE, STREAM_FPS,
-                    STREAM_W, VIDEO_DIR)
+                    STREAM_W, VIDEO_DIR, WEBCAM_INDEX)
 
 
 class FpsMeter:
@@ -174,32 +175,147 @@ class PicameraSource(FrameSource):
 
 
 def camera_available():
-    """picamera2가 깔려 있고 '실제로 연결된 카메라가 있는지'까지 본다.
+    """picamera2 로 쓸 CSI 카메라가 '실제로 연결돼 있는지'까지 본다.
 
     모듈 설치 여부만으로 판정하면 안 된다. 라즈베리파이/reComputer 계열은
     picamera2가 apt로 기본 설치돼 있어서, 카메라를 안 꽂은 보드에서도 import는
     성공한다. 그대로 카메라로 가면 Picamera2()가 IndexError로 죽는다.
+
+    USB 웹캠도 libcamera(uvcvideo)를 거쳐 이 목록에 잡힌다. 그런데 웹캠은
+    PicameraSource 의 FrameDurationLimits 설정을 받지 않아 여는 순간 실패한다
+    (Logitech C922 로 확인). 웹캠은 WebcamSource 가 맡으므로 USB 카메라는 뺀다.
     """
     try:
         from picamera2 import Picamera2
     except ImportError:
         return False
     try:
-        return bool(Picamera2.global_camera_info())
+        return any("usb" not in str(c.get("Id", "")).lower()
+                   for c in Picamera2.global_camera_info())
     except Exception:
         # libcamera 초기화 실패 등. 카메라를 못 쓰는 건 매한가지다.
         return False
 
 
+class NoWebcamError(RuntimeError):
+    pass
+
+
+def _backend():
+    """OS 별로 가장 덜 말썽인 VideoCapture 백엔드.
+
+    기본(CAP_ANY)은 Windows 에서 MSMF 가 잡혀 여는 데 수 초씩 걸리고 MJPG 설정을
+    무시하는 경우가 있다. 리눅스는 V4L2 를 못 박아야 GStreamer 로 새지 않는다.
+    """
+    system = platform.system()
+    if system == "Windows":
+        return cv2.CAP_DSHOW
+    if system == "Linux":
+        return cv2.CAP_V4L2
+    return cv2.CAP_ANY
+
+
+def _webcam_candidates(index=WEBCAM_INDEX):
+    """열어볼 장치 번호 목록. 지정했으면 그것만, 아니면 OS 에 맞게 찾는다.
+
+    리눅스의 /dev/video* 는 웹캠만이 아니다. Pi 5 는 CSI 카메라(rp1-cfe), ISP(pispbe),
+    코덱(hevc) 노드가 십여 개 깔려 있어 VideoCapture(0) 이 엉뚱한 걸 잡을 수 있다.
+    sysfs 에서 USB 에 달린 장치의 첫 노드(index 0 = 캡처. 1 은 UVC 메타데이터)만 고른다.
+    """
+    if index >= 0:
+        return [index]
+    if platform.system() != "Linux":
+        return [0]
+    found = []
+    nodes = Path("/sys/class/video4linux").glob("video*")
+    for node in sorted(nodes, key=lambda n: int(n.name[5:])):
+        try:
+            on_usb = "usb" in os.path.realpath(node / "device")
+            first = (node / "index").read_text().strip() == "0"
+        except OSError:
+            continue
+        if on_usb and first:
+            found.append(int(node.name[5:]))
+    return found
+
+
+class WebcamSource(FrameSource):
+    """USB 웹캠(UVC) 용. cv2.VideoCapture 로 읽는다 (headless 빌드도 캡처는 된다).
+
+    picamera2 와 다른 점 세 가지를 여기서 흡수한다.
+      - MJPG 강제: 기본 YUYV(무압축)는 USB 2.0 대역폭에 걸려 720p 가 5fps 로 떨어진다.
+      - 버퍼 1장: V4L2 는 프레임을 큐잉해서 화면이 1~2초 뒤처진다. 드라이버가 이 값을
+        무시해도 Pipeline._loop 가 쉬지 않고 read 하므로 밀림은 크지 않다.
+      - 해상도/FPS 는 "요청"일 뿐이다. 드라이버가 가장 가까운 모드로 바꿔버리므로
+        set() 뒤 실제 값을 다시 읽어 둔다 (width/height/fps 속성).
+    """
+
+    def __init__(self, index=WEBCAM_INDEX, width=CAPTURE_W, height=CAPTURE_H,
+                 fps=STREAM_FPS):
+        tried = []
+        for idx in _webcam_candidates(index):
+            tried.append(idx)
+            cap = cv2.VideoCapture(idx, _backend())
+            if not cap.isOpened():
+                cap.release()
+                continue
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            cap.set(cv2.CAP_PROP_FPS, fps)
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            ok, frame = cap.read()          # 열렸다고 프레임이 나오는 건 아니다
+            if not ok or frame is None:
+                cap.release()
+                continue
+            self.cap, self.index = cap, idx
+            self.height, self.width = frame.shape[:2]
+            self.fps = cap.get(cv2.CAP_PROP_FPS) or fps
+            return
+        raise NoWebcamError(
+            "사용할 수 있는 웹캠이 없습니다"
+            + (f" (시도한 장치: {tried})" if tried else "")
+            + ". 장치 번호를 알면 WEBCAM_INDEX=N 으로 지정하세요.")
+
+    def read(self):
+        ok, frame = self.cap.read()
+        if ok:
+            return frame
+        time.sleep(0.05)    # 뽑혔거나 잠시 멈춤. 바로 None 을 주면 _loop 가 헛돈다
+        return None
+
+    def close(self):
+        self.cap.release()
+
+
 def open_source(video=None, kind=None):
-    """config.SOURCE로 고르되, auto면 카메라가 연결돼 있을 때만 카메라를 쓴다."""
+    """config.SOURCE 로 고른다. auto 면 CSI 카메라 -> USB 웹캠 -> 영상 파일 순으로 되는 것을 쓴다."""
     kind = (kind or SOURCE).lower()
+    if kind == "auto" and video:
+        # VIDEO=경로 로 영상을 직접 골랐으면 그걸 보려는 것이다. 웹캠이 꽂혀 있다고
+        # 카메라로 가버리면 기준 영상(falling_box_slow 등)으로 확인할 수가 없다.
+        kind = "video"
     if kind == "auto":
-        kind = "picamera" if camera_available() else "video"
+        # CSI 카메라가 없으면 picamera 는 시도하지 않는다 — 실패 로그만 늘어난다.
+        candidates = (["picamera"] if camera_available() else []) + ["webcam"]
+        for name in candidates:
+            try:
+                return open_source(video, name)
+            except Exception as e:
+                # auto 의 목적이 "되는 걸 쓴다"라 예외 종류를 가리지 않는다. 대신 이유는
+                # 남겨서, 카메라가 빠진 건지 코드가 깨진 건지 로그로 구분되게 한다.
+                print(f"[source] {name} 사용 불가 -> 다음 후보로 ({type(e).__name__}: {e})",
+                      flush=True)
+        kind = "video"
     if kind == "picamera":
         return PicameraSource(), "picamera2"
-    video = Path(video) if video else find_video()
-    return FfmpegSource(video), f"ffmpeg:{video.name}"
+    if kind == "webcam":
+        src = WebcamSource()
+        return src, f"webcam:{src.index} ({src.width}x{src.height} {src.fps:g}fps)"
+    if kind == "video":
+        video = Path(video) if video else find_video()
+        return FfmpegSource(video), f"ffmpeg:{video.name}"
+    raise RuntimeError(f"SOURCE={kind!r} 는 지원하지 않습니다 (picamera | webcam | video | auto)")
 
 
 # ---------------------------------------------------------------- 송출

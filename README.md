@@ -34,7 +34,7 @@ venv 생성 → 패키지 설치 → 샘플 영상 정리 → yolov8n ONNX 준�
 | 파일                  | 역할                                                                            |
 | --------------------- | ------------------------------------------------------------------------------- |
 | `app.py`            | HTTP 서버, 추론 워커, ROI 체류 판정과 이벤트 발행                               |
-| `frames.py`         | 프레임 소스(Picamera2/ffmpeg)와 공유 파이프라인, MJPEG fan-out                  |
+| `frames.py`         | 프레임 소스(Picamera2/USB 웹캠/ffmpeg)와 공유 파이프라인, MJPEG fan-out         |
 | `detector.py`       | `model/` 의 단일 ONNX를 onnxruntime으로 서빙 (클래스명은 메타데이터에서 읽음) |
 | `pose.py`           | YOLOv8-pose 로 사람 관절점을 뽑아 몸/고개 방향을 판정 (선택)                    |
 | `fall.py`           | 떨어지는 박스를 잡아 사람의 왼쪽/오른쪽 중 어느 쪽인지 판정                      |
@@ -78,7 +78,8 @@ STREAM_W=640 AI_FPS=2 CONF_THRESHOLD=0.45 python app.py
 
 | 변수                            | 기본값           | 설명                                                         |
 | ------------------------------- | ---------------- | ------------------------------------------------------------ |
-| `SOURCE`                      | `auto`         | `picamera` / `video` / `auto`(picamera2 있으면 카메라) |
+| `SOURCE`                      | `auto`         | `picamera` / `webcam` / `video` / `auto`(CSI 카메라 → USB 웹캠 → 영상 파일) |
+| `WEBCAM_INDEX`                | `-1`           | 웹캠 장치 번호. `-1` 이면 자동(리눅스는 USB 캡처 노드, 그 외 0) |
 | `AI_FPS`                      | `4`            | 추론 주기. Pi 5 CPU 기준 3~5 권장                            |
 | `STREAM_W` / `JPEG_QUALITY` | `960` / `75` | 송출 대역폭 조절                                             |
 | `ROI_MATCH`                   | `overlap`      | `overlap`(박스 겹침 비율) / `foot`(발밑 점이 폴리곤 안)  |
@@ -185,9 +186,14 @@ sudo apt install -y python3-picamera2 python3-opencv python3-numpy
 python setup.py
 ```
 
-`SOURCE=auto` 는 카메라가 **실제로 연결돼 있을 때만** 카메라를 쓰고, 없으면 영상
-파일로 넘어간다. 카메라를 꽂았는데도 영상 파일로 가면 `python setup.py --check`
-의 카메라 줄을 확인한다.
+`SOURCE=auto` 는 **CSI 카메라 → USB 웹캠 → 영상 파일** 순으로, 실제로 열리는 첫 번째를
+쓴다. 실패한 후보는 `[source] ... 사용 불가` 로그로 이유를 남긴다. `VIDEO=경로` 를 주면
+카메라를 건너뛰고 그 영상을 쓴다.
+
+USB 웹캠(예: Logitech C922)은 libcamera 에도 카메라로 잡히지만 picamera2 설정을 받지 않아
+CSI 경로에서는 열리지 않는다. 그래서 CSI 판정에서 USB 카메라는 빼고, 웹캠은 OpenCV V4L2 로
+MJPG 를 받아 읽는다. 카메라를 꽂았는데도 영상 파일로 가면 앱 시작 로그의 `[source]` 줄과
+`python setup.py --check` 의 카메라 줄을 확인한다.
 
 ---
 

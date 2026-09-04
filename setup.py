@@ -301,9 +301,9 @@ def step_video(args):
     if video:
         say("      video/%s (%.1fMB)" % (video.name, video.stat().st_size / 1e6))
     else:
-        # 카메라(picamera2)로 돌릴 거면 영상이 없어도 되므로 실패로 보지 않는다.
-        say("      ! video/ 에 mp4가 없습니다. 카메라(SOURCE=picamera)로 쓸 게 "
-            "아니라면 mp4 하나를 넣어주세요.")
+        # 카메라(picamera2/웹캠)로 돌릴 거면 영상이 없어도 되므로 실패로 보지 않는다.
+        say("      ! video/ 에 mp4가 없습니다. 카메라(SOURCE=picamera 또는 webcam)로 "
+            "쓸 게 아니라면 mp4 하나를 넣어주세요.")
     return video
 
 
@@ -409,7 +409,7 @@ def step_ffmpeg(args):
         return found
     if IS_ARM_LINUX:
         # Pi는 카메라 입력이 기본이라 ffmpeg가 필요 없다. 영상 파일을 쓸 때만 필요.
-        say("      없음 — 카메라(picamera2)로 쓸 거면 필요 없습니다.")
+        say("      없음 — 카메라(picamera2/웹캠)로 쓸 거면 필요 없습니다.")
         say("      영상 파일로 쓸 거면: sudo apt install -y ffmpeg")
         return None
     if IS_WIN:

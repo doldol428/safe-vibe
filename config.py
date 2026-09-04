@@ -38,8 +38,11 @@ VIDEO = os.environ.get("VIDEO")
 PORT = _int("PORT", 8080)
 
 # ---------------------------------------------------------------- 캡처 / 송출
-# "picamera" | "video" | "auto"(picamera2가 있으면 카메라, 없으면 영상 파일)
+# "picamera" | "webcam" | "video" | "auto"
+#   auto: picamera2 카메라 -> USB 웹캠 -> 영상 파일 순으로, 열리는 첫 번째 것을 쓴다.
 SOURCE = (os.environ.get("SOURCE") or "auto").lower()
+# USB 웹캠 장치 번호. -1 이면 자동 탐색(리눅스: sysfs 에서 USB 캡처 노드, 그 외 OS: 0).
+WEBCAM_INDEX = _int("WEBCAM_INDEX", -1)
 CAPTURE_W = _int("CAPTURE_W", 1280)      # AI가 쓰는 원본 해상도
 CAPTURE_H = _int("CAPTURE_H", 720)
 STREAM_FPS = _float("STREAM_FPS", 15)

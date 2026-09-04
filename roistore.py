@@ -120,3 +120,43 @@ def point_in_polygon(x, y, points):
         if (yi > y) != (yj > y) and x < (xj - xi) * (y - yi) / (yj - yi) + xi:
             inside = not inside
     return inside
+
+
+def box_overlap_ratio(box, points):
+    """박스와 다각형이 겹치는 면적이 박스 면적의 몇 배인지 (0~1).
+
+    다각형을 박스의 네 변으로 차례로 잘라내고(Sutherland-Hodgman) 남은 조각의
+    면적을 신발끈 공식으로 잰다. 잘라내는 쪽이 사각형(볼록)이라 ROI 가 오목해도
+    면적은 맞다. 박스와 ROI 모두 0~1 정규화 좌표라 비율은 화면 비율과 무관하다.
+    """
+    x1, y1, x2, y2 = box
+    area = (x2 - x1) * (y2 - y1)
+    if area <= 0 or len(points) < 3:
+        return 0.0
+
+    poly = [(p["x"], p["y"]) for p in points]
+    # (축, 경계값, 경계보다 큰 쪽이 안쪽인가): x>=x1, x<=x2, y>=y1, y<=y2
+    for axis, bound, keep_greater in ((0, x1, True), (0, x2, False),
+                                      (1, y1, True), (1, y2, False)):
+        if not poly:
+            return 0.0
+        clipped = []
+        prev = poly[-1]
+        prev_in = prev[axis] >= bound if keep_greater else prev[axis] <= bound
+        for cur in poly:
+            cur_in = cur[axis] >= bound if keep_greater else cur[axis] <= bound
+            if cur_in != prev_in:           # 경계를 가로지르는 변 -> 교점을 넣는다
+                t = (bound - prev[axis]) / (cur[axis] - prev[axis])
+                clipped.append((prev[0] + t * (cur[0] - prev[0]),
+                                prev[1] + t * (cur[1] - prev[1])))
+            if cur_in:
+                clipped.append(cur)
+            prev, prev_in = cur, cur_in
+        poly = clipped
+
+    inter = 0.0
+    for i in range(len(poly)):
+        ax, ay = poly[i]
+        bx, by = poly[(i + 1) % len(poly)]
+        inter += ax * by - bx * ay
+    return min(abs(inter) / 2 / area, 1.0)

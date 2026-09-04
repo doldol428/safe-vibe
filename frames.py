@@ -177,7 +177,9 @@ class FrameHub:
 
     def stream(self):
         """접속자마다 하나씩. 최신 프레임만 보내므로 느린 클라이언트는 프레임을 건너뛴다."""
-        last = -1
+        # _seq 는 publish 때만 오르므로 0 은 "아직 한 장도 없음"이다. -1 로 시작하면
+        # 첫 프레임이 나오기 전에 접속한 클라이언트에게 None 을 그대로 흘려보낸다.
+        last = 0
         while True:
             with self._cond:
                 if not self._cond.wait_for(lambda: self._seq != last, timeout=10):

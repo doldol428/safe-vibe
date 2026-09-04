@@ -64,6 +64,15 @@ TRACK_IOU = _float("TRACK_IOU", 0.3)         # 검출-트랙 매칭 임계값
 
 # ---------------------------------------------------------------- 이벤트
 EVENT_CLASSES = _list("EVENT_CLASSES", "person")
+# ROI 진입 판정 방식.
+#   overlap : 박스와 ROI 가 겹치는 면적이 박스 면적의 ROI_OVERLAP_MIN 을 넘으면 진입.
+#             0 이면 조금이라도 겹치면 진입. 정면/내려보는 카메라처럼 발이 안 보이거나
+#             ROI 를 사람 몸 주변에 그리는 경우에 맞다.
+#   foot    : 박스 하단 중앙(발밑)이 폴리곤 안에 있어야 진입. 바닥에 구역을 그릴 때.
+ROI_MATCH = (os.environ.get("ROI_MATCH") or "overlap").lower()
+if ROI_MATCH not in ("overlap", "foot"):
+    raise SystemExit(f"ROI_MATCH 는 overlap 또는 foot 이어야 합니다: {ROI_MATCH!r}")
+ROI_OVERLAP_MIN = _float("ROI_OVERLAP_MIN", 0)   # 0~1. 이 값을 '초과'해야 진입
 # ROI 안에 이만큼 계속 머물러야 이벤트를 낸다. 스쳐 지나가는 것과 구분한다.
 DWELL_SEC = _float("DWELL_SEC", 2)
 # ROI 경계에서 박스가 흔들리면 진입/이탈이 반복돼 같은 사람이 여러 번 잡힌다.

@@ -38,7 +38,7 @@ cp arduino_secrets.h.example arduino_secrets.h
 
 | 상수 | 기본값 | 비고 |
 | --- | --- | --- |
-| `MQTT_HOST` | `172.30.6.183` | 브로커가 뜬 장비의 IP |
+| `MQTT_HOST` | `172.30.6.222` | 브로커가 뜬 장비의 IP |
 | `MQTT_PORT` | `1883` | |
 | `MQTT_TOPIC` | `safe-vibe/alert` | `config.py` 의 `MQTT_TOPIC` 과 같아야 한다 |
 | `MQTT_CLIENT_ID` | `""` | 비우면 `safe-vibe-<MAC>` 자동 생성 |
@@ -73,6 +73,10 @@ allow_anonymous true
 
 `netstat -ano | findstr ":1883"` 에 `0.0.0.0:1883 ... LISTENING` 이 보이면 정상.
 
+라즈베리파이(Debian)에서는 위 두 줄을 `/etc/mosquitto/conf.d/safe-vibe.conf` 에 두고
+`sudo systemctl restart mosquitto` 한다. `ss -ltn | grep 1883` 에 `0.0.0.0:1883` 이
+보이면 정상이고, 서비스는 설치 시 enable 되어 재부팅 후에도 자동으로 뜬다.
+
 주의 두 가지:
 
 - mosquitto 2.x 는 `listener` 를 명시하는 순간 `allow_anonymous` 가 기본
@@ -87,7 +91,7 @@ Windows 방화벽에서 1883 인바운드도 열어야 하며, 규칙의 프로�
 ## 동작 확인
 
 ```
-mosquitto_pub -h 172.30.6.183 -t safe-vibe/alert -q 1 \
+mosquitto_pub -h 172.30.6.222 -t safe-vibe/alert -q 1 \
   -m '{"event":"roi_dwell","roi_id":1,"roi_name":"test","track_id":99,"name":"person","dwell":2.1}'
 ```
 
@@ -99,7 +103,7 @@ mosquitto_pub -h 172.30.6.183 -t safe-vibe/alert -q 1 \
 === safe-vibe-client (UNO R4 WiFi) ===
 [mqtt] client id : safe-vibe-A1B2C3D4E5F6
 [wifi] 연결됨 — IP 172.30.6.201  RSSI -52
-[mqtt] 172.30.6.183:1883 접속 시도
+[mqtt] 172.30.6.222:1883 접속 시도
 [mqtt] 연결됨 — 구독: safe-vibe/alert
 [event] test — #99 person 2.1초 체류 -> 진동
 ```

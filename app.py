@@ -104,8 +104,16 @@ class DetectionWorker:
             if sleep > 0:
                 time.sleep(sleep)
 
+    @staticmethod
+    def _in_roi(box, points):
+        """config.ROI_MATCH 에 따라 트랙 박스가 ROI 에 걸렸는지 본다."""
+        if cfg.ROI_MATCH == "foot":
+            x1, _, x2, y2 = box
+            return roistore.point_in_polygon((x1 + x2) / 2, y2, points)
+        return roistore.box_overlap_ratio(box, points) > cfg.ROI_OVERLAP_MIN
+
     def _match_rois(self, tracks, now):
-        """트랙의 발밑(박스 하단 중앙)이 ROI 안에 있으면 그 ROI에 걸린 것으로 본다.
+        """트랙 박스가 ROI 에 걸리면(_in_roi) 그 ROI 안에 있는 것으로 본다.
 
         트랙 ID가 있으므로 "같은 사람이 계속 있는 것"과 "새로 들어온 것"을 구분할 수
         있다. 이벤트는 (트랙, ROI) 조합마다 체류 DWELL_SEC를 넘길 때 한 번만 낸다.
@@ -117,10 +125,7 @@ class DetectionWorker:
         fired = []
 
         for t in tracks:
-            x1, _, x2, y2 = t.box
-            foot = ((x1 + x2) / 2, y2)
-            inside = {r["id"] for r in rois
-                      if roistore.point_in_polygon(*foot, r["points"])}
+            inside = {r["id"] for r in rois if self._in_roi(t.box, r["points"])}
             t.roi_in = inside
 
             for rid in inside:
@@ -254,6 +259,8 @@ class Handler(BaseHTTPRequestHandler):
             "tracker": (f"IoU (max_age={cfg.TRACK_MAX_AGE}, min_hits={cfg.TRACK_MIN_HITS}, "
                         f"iou={cfg.TRACK_IOU})"),
             "dwell_sec": cfg.DWELL_SEC,
+            "roi_match": ("foot" if cfg.ROI_MATCH == "foot"
+                          else f"overlap > {cfg.ROI_OVERLAP_MIN:g}"),
             "mqtt": self.publisher.status() if self.publisher else {"enabled": False},
         }
 
@@ -337,7 +344,9 @@ def main():
 
     print(f"source: {source_name} @ {cfg.CAPTURE_W}x{cfg.CAPTURE_H} "
           f"{cfg.STREAM_FPS}fps (AI {cfg.AI_FPS}fps)", flush=True)
-    print(f"roi   : {roistore.ROI_FILE} -> {len(roistore.list_rois())} ROI", flush=True)
+    match = "발밑 점" if cfg.ROI_MATCH == "foot" else f"겹침 비율 > {cfg.ROI_OVERLAP_MIN:g}"
+    print(f"roi   : {roistore.ROI_FILE} -> {len(roistore.list_rois())} ROI (판정: {match})",
+          flush=True)
     print(f"serving http://localhost:{cfg.PORT}", flush=True)
     try:
         # OSError를 잡아서 폴백하면 "포트 사용 중" 에러까지 삼켜버리므로,

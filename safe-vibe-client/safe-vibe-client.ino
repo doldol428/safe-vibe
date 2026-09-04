@@ -33,7 +33,7 @@
 const char WIFI_SSID[]     = SECRET_WIFI_SSID;
 const char WIFI_PASS[]     = SECRET_WIFI_PASS;   // 개방망이면 빈 문자열
 
-const char MQTT_HOST[]     = "172.30.6.183";
+const char MQTT_HOST[]     = "172.30.6.222";
 const int  MQTT_PORT       = 1883;
 const char MQTT_TOPIC[]    = "safe-vibe/alert";  // config.py 의 MQTT_TOPIC 과 같아야 한다
 // 클라이언트 ID 는 보드 MAC 으로 자동 생성한다. 비워두면 "safe-vibe-<MAC>" 이 되고,

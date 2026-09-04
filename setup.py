@@ -198,12 +198,63 @@ def write_path_hook(py):
 
 # ---------------------------------------------------------------- 2. 패키지
 
-# venv 안에서 실행할 한 줄짜리 확인 코드. argv[1]은 출력 앞에 붙일 들여쓰기다.
-IMPORT_CHECK = (
-    "import sys, cv2, numpy, onnxruntime as ort;"
-    "print(sys.argv[1] + 'cv2 ' + cv2.__version__ + ' | numpy ' + numpy.__version__"
-    " + ' | onnxruntime ' + ort.__version__)"
-)
+# venv 안에서 돌려 실제로 import 되는지 본다. argv[1]은 출력 앞에 붙일 들여쓰기다.
+# 하나라도 없으면 통째로 죽는 방식은 무엇이 빠졌는지 알려주지 못한다. 모듈별로
+# 잡아서 버전 줄은 stdout 으로, 빠진 목록은 stderr 로 나눠 보낸다.
+IMPORT_CHECK = """
+import importlib, sys
+
+missing, parts = [], []
+for mod in ("cv2", "numpy", "onnxruntime"):
+    try:
+        m = importlib.import_module(mod)
+    except Exception:
+        missing.append(mod)
+        parts.append(mod + " 없음")
+    else:
+        parts.append(mod + " " + getattr(m, "__version__", "?"))
+print(sys.argv[1] + " | ".join(parts))
+if missing:
+    sys.stderr.write("MISSING " + " ".join(missing) + "\\n")
+    sys.exit(1)
+"""
+
+MISSING_TAG = "MISSING "
+
+# 리눅스에서 pip 로 깔면 안 되는(혹은 몇십 분 걸리는) 것들의 apt 패키지 이름.
+APT_PACKAGE = {"cv2": "python3-opencv", "numpy": "python3-numpy"}
+
+# ARM 리눅스에서 pip 로 얹는 것들. opencv/numpy 처럼 빌드가 오래 걸리는 것만
+# apt 로 넘기고, 순수 파이썬 패키지는 여기서 venv 안에 깐다.
+ARM_PIP_PACKAGES = ("onnxruntime", "paho-mqtt")
+
+
+def check_imports(py, indent):
+    """import 되는 것/안 되는 것을 한 줄로 보여주고, 빠진 모듈 목록을 돌려준다."""
+    out = subprocess.run([str(py), "-c", IMPORT_CHECK, indent],
+                         capture_output=True, text=True)
+    say(out.stdout.rstrip() or (indent + "확인 실패"))
+    for line in out.stderr.splitlines():
+        if line.startswith(MISSING_TAG):
+            return line[len(MISSING_TAG):].split()
+    return []
+
+
+def missing_hints(missing):
+    """빠진 모듈에 맞는 다음 행동. 원인이 다르면 처방도 달라야 한다."""
+    hints = []
+    pkgs = [APT_PACKAGE[m] for m in missing if m in APT_PACKAGE]
+    if pkgs and IS_ARM_LINUX:
+        # venv 는 --system-site-packages 로 만들었으니 apt 로 깔면 바로 보인다.
+        # 여기서 .venv 를 지우라고 하면 원인과 상관없는 헛수고가 된다.
+        hints.append("apt 패키지가 빠졌습니다:  sudo apt install -y %s"
+                     % " ".join(pkgs))
+        hints.append("깔고 나서 이 스크립트를 다시 실행하면 됩니다 (.venv 는 그대로 둬도 됩니다).")
+    elif pkgs:
+        hints.append("pip 설치가 덜 됐습니다. .venv 를 지우고 다시 실행해 보세요.")
+    if "onnxruntime" in missing:
+        hints.append("onnxruntime 설치가 실패했습니다. .venv 를 지우고 다시 실행해 보세요.")
+    return hints
 
 
 def step_packages(py, args):
@@ -214,21 +265,21 @@ def step_packages(py, args):
     run([py, "-m", "pip", "install", "--upgrade", "--quiet", "pip"])
 
     if IS_ARM_LINUX:
-        # numpy/opencv는 apt 쪽을 그대로 쓰고 onnxruntime 만 pip로 얹는다.
-        say("      ARM 리눅스 — onnxruntime 만 설치합니다.")
+        # numpy/opencv는 apt 쪽을 그대로 쓰고, 나머지 순수 파이썬 패키지만 pip로 얹는다.
+        # requirements.txt 에 pip 로 깔아도 되는 게 늘면 여기에도 같이 넣어야 한다.
+        say("      ARM 리눅스 — %s 만 설치합니다." % ", ".join(ARM_PIP_PACKAGES))
         say("      numpy/opencv/picamera2 는 apt 로 미리 깔아두세요:")
         say("        sudo apt install -y python3-picamera2 python3-opencv python3-numpy")
-        run([py, "-m", "pip", "install", "onnxruntime"])
+        run([py, "-m", "pip", "install", *ARM_PIP_PACKAGES])
     else:
         run([py, "-m", "pip", "install", "-r", str(BASE / "requirements.txt")])
 
     # 실제로 import 되는지까지 봐야 설치 성공이라 할 수 있다. 특히 opencv는
     # 설치는 되고 import 에서 깨지는 경우(전역 full 버전과 섞임)가 흔하다.
-    try:
-        run([py, "-c", IMPORT_CHECK, "      "])
-    except Fail:
-        raise Fail("패키지는 설치됐는데 import 가 실패했습니다. "
-                   ".venv 를 지우고 다시 실행해 보세요.")
+    missing = check_imports(py, "      ")
+    if missing:
+        raise Fail("import 실패: %s\n      %s"
+                   % (", ".join(missing), "\n      ".join(missing_hints(missing))))
 
 
 # ---------------------------------------------------------------- 3. 영상
@@ -420,7 +471,8 @@ def do_check():
     py = venv_python(VENV)
     say("  .venv        : %s" % (py if py.exists() else "없음"))
     if py.exists():
-        subprocess.run([str(py), "-c", IMPORT_CHECK, "  패키지       : "])
+        for hint in missing_hints(check_imports(py, "  패키지       : ")):
+            say("                 %s" % hint)
     # 점검은 무슨 상태든 끝까지 보여줘야 쓸모가 있다. 규칙 위반(파일 여러 개)도
     # 예외로 죽이지 말고 그 줄에 이유를 적는다.
     for label, directory, pattern, what in (

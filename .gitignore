@@ -1,13 +1,21 @@
-# 영상 원본
+# 영상 원본 — 데모용 샘플 하나만 저장소에 둔다 (setup 직후 바로 돌려볼 수 있게)
 *.mp4
+!video/falldown.mp4
+
+# setup.py 가 만드는 것들
+.venv/
+.venv-export/
+.cache/
 
 # 실행 중 생성되는 ROI 설정
 roi.json
 roi.json.*.tmp
 
-# 모델 가중치 (용량 큼)
+# 모델 가중치 (용량 큼) — 데모용 yolov8n 하나만 저장소에 둔다.
+# 출처와 라이선스는 model/NOTICE.md 참고.
 model/*.onnx
 model/*.pt
+!model/yolov8n.onnx
 
 # 파이썬 캐시
 __pycache__/

@@ -466,6 +466,33 @@ def install_ffmpeg_linux():
 
 # ---------------------------------------------------------------- 점검 / 요약
 
+# picamera2 는 apt 로 깔리므로 이 스크립트를 돌리는 파이썬에서는 안 보일 수 있다.
+# 앱과 같은 조건으로 보려면 .venv 의 파이썬에서 물어봐야 한다.
+CAMERA_CHECK = """
+try:
+    from picamera2 import Picamera2
+except ImportError:
+    print("picamera2 없음 (SOURCE=auto 는 영상 파일을 쓴다)")
+else:
+    try:
+        info = Picamera2.global_camera_info()
+    except Exception as e:
+        print("picamera2 는 있으나 조회 실패: %s" % e)
+    else:
+        print("%d대 연결됨" % len(info) if info else
+              "picamera2 는 있으나 연결된 카메라 없음 (SOURCE=video 로 실행)")
+"""
+
+
+def camera_status(py):
+    """카메라 연결 여부. 모듈 설치와 실제 연결은 별개라 둘 다 구분해서 보여준다."""
+    if not py.exists():
+        return "확인 불가 (.venv 없음)"
+    out = subprocess.run([str(py), "-c", CAMERA_CHECK],
+                         capture_output=True, text=True)
+    return out.stdout.strip() or (out.stderr.strip().splitlines() or ["확인 실패"])[-1]
+
+
 def do_check():
     say("환경 점검\n")
     py = venv_python(VENV)
@@ -484,6 +511,8 @@ def do_check():
         except Fail as e:
             say("  %-12s : %s" % (label, e))
     say("  %-12s : %s" % ("ffmpeg", find_ffmpeg() or "없음"))
+    # 한글 라벨은 %-12s 로 맞추면 폭이 어긋난다. 위 '패키지' 줄과 같은 방식으로 직접 띄운다.
+    say("  카메라       : %s" % camera_status(py))
 
 
 def summary():

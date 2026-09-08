@@ -126,6 +126,13 @@ class PicameraSource(FrameSource):
     def __init__(self, width=CAPTURE_W, height=CAPTURE_H, fps=STREAM_FPS):
         from picamera2 import Picamera2      # Pi 밖에서는 import 자체가 실패한다
 
+        # 카메라가 없으면 Picamera2()는 빈 목록을 인덱싱하다 IndexError로 죽는다.
+        # 무슨 일인지 알 수 없는 트레이스백 대신 원인을 먼저 말한다.
+        if not Picamera2.global_camera_info():
+            raise RuntimeError(
+                "연결된 카메라가 없습니다. CSI 케이블을 확인하거나, "
+                "영상 파일로 쓸 거면 SOURCE=video 로 실행하세요")
+
         self.cam = Picamera2()
         # picamera2의 "RGB888"은 numpy에서 BGR 순서로 나온다 (알려진 표기 혼동).
         # 즉 이 설정이 곧 cv2 기본 순서라 별도 변환이 필요 없다.
@@ -144,15 +151,29 @@ class PicameraSource(FrameSource):
         self.cam.close()
 
 
+def camera_available():
+    """picamera2가 깔려 있고 '실제로 연결된 카메라가 있는지'까지 본다.
+
+    모듈 설치 여부만으로 판정하면 안 된다. 라즈베리파이/reComputer 계열은
+    picamera2가 apt로 기본 설치돼 있어서, 카메라를 안 꽂은 보드에서도 import는
+    성공한다. 그대로 카메라로 가면 Picamera2()가 IndexError로 죽는다.
+    """
+    try:
+        from picamera2 import Picamera2
+    except ImportError:
+        return False
+    try:
+        return bool(Picamera2.global_camera_info())
+    except Exception:
+        # libcamera 초기화 실패 등. 카메라를 못 쓰는 건 매한가지다.
+        return False
+
+
 def open_source(video=None, kind=None):
-    """config.SOURCE로 고르되, auto면 picamera2가 있을 때 카메라, 없으면 영상 파일."""
+    """config.SOURCE로 고르되, auto면 카메라가 연결돼 있을 때만 카메라를 쓴다."""
     kind = (kind or SOURCE).lower()
     if kind == "auto":
-        try:
-            import picamera2  # noqa: F401
-            kind = "picamera"
-        except ImportError:
-            kind = "video"
+        kind = "picamera" if camera_available() else "video"
     if kind == "picamera":
         return PicameraSource(), "picamera2"
     video = Path(video) if video else find_video()

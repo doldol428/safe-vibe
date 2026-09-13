@@ -1,0 +1,20 @@
+# 학습 전용 의존성. 앱(.venv)과 반드시 별도의 venv 에 설치할 것.
+#
+#   python -m venv .venv-train
+#   .venv-train/bin/pip install -r training/requirements.txt
+#
+# 이유: ultralytics 가 opencv-python(full)을 끌고 오는데 앱은
+# opencv-python-headless 를 쓴다. 같은 venv 에 둘 다 들어가면 같은 cv2 경로를
+# 덮어써서 둘 다 깨진다 (루트 requirements.txt 의 설명과 같은 문제).
+#
+# 학습은 개발 PC/서버에서만 한다. 라즈베리파이에는 설치하지 말 것 —
+# Pi 는 결과물인 .onnx 만 있으면 되고 torch 는 필요 없다.
+
+ultralytics
+
+# torch 는 ultralytics 가 의존성으로 끌고 온다. GPU 를 쓰려면 CUDA 버전에 맞는
+# 빌드를 먼저 깔아야 한다. 안 그러면 CPU 판이 설치돼 학습이 매우 느리다.
+#   https://pytorch.org/get-started/locally/ 에서 명령을 확인해 먼저 실행:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#
+# prepare_dataset.py 는 표준 라이브러리만 쓰므로 이 파일 없이도 돌아간다.

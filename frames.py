@@ -7,6 +7,7 @@
 AI용 raw 프레임과 모니터링용 JPEG를 분리해서, MJPEG을 다시 디코드하는 낭비가 없다.
 카메라가 바뀌어도(FfmpegSource <-> PicameraSource) 위쪽 코드는 손대지 않는다.
 """
+import os
 import shutil
 import subprocess
 import threading
@@ -82,11 +83,20 @@ class FfmpegSource(FrameSource):
         self.width, self.height, self.fps = width, height, fps
         self.frame_bytes = width * height * 3
         self.proc = None
+        self._closed = False
         self._spawn()
 
     def _spawn(self):
+        # 터미널의 Ctrl+C는 같은 프로세스 그룹 전체에 간다. ffmpeg가 그걸 같이 받으면
+        # 앱이 정리하기 전에 먼저 죽으면서 "Error muxing a packet" 로그를 쏟는다.
+        # 그룹을 떼어두고, 끄는 건 부모가 close()로 직접 한다.
+        if os.name == "nt":
+            isolate = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
+        else:
+            isolate = {"start_new_session": True}
         self.proc = subprocess.Popen([
             "ffmpeg", "-hide_banner", "-loglevel", "error",
+            "-nostdin",                 # 터미널 키 입력을 ffmpeg 명령으로 가로채지 않게
             "-stream_loop", "-1",       # 무한 반복
             "-re",                      # 실시간 속도
             "-i", str(self.video),
@@ -94,30 +104,41 @@ class FfmpegSource(FrameSource):
             "-r", str(self.fps),
             "-vf", f"scale={self.width}:{self.height}",
             "-f", "rawvideo", "-pix_fmt", "bgr24", "pipe:1",
-        ], stdout=subprocess.PIPE, bufsize=0)
+        ], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, bufsize=0, **isolate)
 
     def read(self):
+        proc = self.proc
+        if proc is None:
+            return None
         # 파이프의 read()는 요청보다 적게 돌려줄 수 있으므로 한 프레임을 채울 때까지 읽는다.
         buf = bytearray()
         while len(buf) < self.frame_bytes:
-            chunk = self.proc.stdout.read(self.frame_bytes - len(buf))
-            if not chunk:               # EOF — ffmpeg가 죽었으면 다시 띄운다
-                self.close()
-                self._spawn()
+            chunk = proc.stdout.read(self.frame_bytes - len(buf))
+            if not chunk:
+                # EOF. close()로 끈 거면 그대로 두고, 스스로 죽은 거면 다시 띄운다.
+                if not self._closed:
+                    self._stop_proc()
+                    self._spawn()
                 return None
             buf += chunk
         return np.frombuffer(bytes(buf), np.uint8).reshape(
             self.height, self.width, 3)
 
     def close(self):
-        if not self.proc:
+        self._closed = True
+        self._stop_proc()
+
+    def _stop_proc(self):
+        proc, self.proc = self.proc, None
+        if proc is None:
             return
-        self.proc.terminate()
+        proc.terminate()
         try:
-            self.proc.wait(timeout=3)
+            proc.wait(timeout=3)
         except subprocess.TimeoutExpired:
-            self.proc.kill()
-        self.proc = None
+            proc.kill()
+            proc.wait()
+        proc.stdout.close()
 
 
 class PicameraSource(FrameSource):
@@ -223,17 +244,22 @@ class Pipeline:
         self._frame_seq = 0
         self._meter = FpsMeter()
         self._stop = threading.Event()
+        self._thread = None
 
     @property
     def fps(self):
         return self._meter.value
 
     def start(self):
-        threading.Thread(target=self._loop, daemon=True).start()
+        self._thread = threading.Thread(target=self._loop, name="capture", daemon=True)
+        self._thread.start()
         return self
 
-    def stop(self):
+    def stop(self, timeout=3):
+        """루프를 먼저 세우고 소스를 닫는다. 반대 순서면 루프가 닫힌 소스를 읽는다."""
         self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout)
         self.source.close()
 
     def latest(self):

@@ -14,7 +14,9 @@ AI는 raw 프레임을 그대로 쓰고, 웹 송출용 JPEG는 따로 만든다.
 MJPEG을 다시 디코드해서 추론에 쓰는 낭비가 없다.
 """
 import json
+import os
 import re
+import signal
 import socket
 import threading
 import time
@@ -52,10 +54,18 @@ class DetectionWorker:
         self.meter = frames.FpsMeter()
         self.events = deque(maxlen=cfg.EVENT_LOG_SIZE)
         self._stop = threading.Event()
+        self._thread = None
 
     def start(self):
-        threading.Thread(target=self._loop, daemon=True).start()
+        self._thread = threading.Thread(target=self._loop, name="detect", daemon=True)
+        self._thread.start()
         return self
+
+    def stop(self, timeout=3):
+        """진행 중인 추론 한 번은 끝까지 돌리고 멈춘다."""
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout)
 
     def snapshot(self):
         with self.lock:
@@ -77,7 +87,7 @@ class DetectionWorker:
             started = time.perf_counter()
             frame, seq = self.pipeline.latest()
             if frame is None or seq == last_seq:
-                time.sleep(0.01)        # 아직 새 프레임이 없음
+                self._stop.wait(0.01)   # 아직 새 프레임이 없음
                 continue
             last_seq = seq
 
@@ -86,7 +96,7 @@ class DetectionWorker:
                 results = self.model.infer(frame)
             except Exception as e:      # 추론이 실패해도 송출은 계속되어야 한다
                 print(f"[detect] 추론 실패: {e}", flush=True)
-                time.sleep(0.5)
+                self._stop.wait(0.5)
                 continue
             infer_ms = (time.perf_counter() - t0) * 1000
 
@@ -102,7 +112,7 @@ class DetectionWorker:
 
             sleep = interval - (time.perf_counter() - started)
             if sleep > 0:
-                time.sleep(sleep)
+                self._stop.wait(sleep)  # stop() 하면 대기 중에도 바로 깬다
 
     @staticmethod
     def _in_roi(box, points):
@@ -302,66 +312,113 @@ class Handler(BaseHTTPRequestHandler):
 
 # ---------------------------------------------------------------- 시작
 
+# Windows에서는 SO_REUSEADDR 때문에 두 번째 인스턴스가 같은 포트에
+# 조용히 바인딩된다. 꺼두면 중복 실행 시 바로 에러가 난다.
+class Server(ThreadingHTTPServer):
+    allow_reuse_address = False
+    daemon_threads = True
+
+
+# Windows에서 localhost는 ::1(IPv6)로 먼저 풀린다. IPv4만 듣고 있으면
+# 클라이언트가 ::1 시도 -> 실패 -> IPv4 폴백을 거치느라 요청마다
+# 수백 ms가 붙는다. 듀얼스택으로 열어 IPv6/IPv4를 한 소켓으로 받는다.
+class DualStackServer(Server):
+    address_family = socket.AF_INET6
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
+class Shutdown:
+    """Ctrl+C(SIGINT) / SIGTERM / Ctrl+Break(SIGBREAK, Windows)를 받아 정리 후 종료한다.
+
+    서버가 떠 있으면 KeyboardInterrupt 대신 httpd.shutdown()으로 serve_forever를
+    정상 반환시킨다. shutdown()은 serve_forever가 끝나길 기다리는데, 핸들러는 바로
+    그 serve_forever를 돌리는 메인 스레드에서 실행되므로 직접 부르면 교착된다.
+    그래서 별도 스레드에서 부른다.
+    """
+
+    def __init__(self):
+        self.httpd = None
+        self.requested = False
+
+    def install(self):
+        for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+            if hasattr(signal, name):           # SIGBREAK는 Windows에만 있다
+                signal.signal(getattr(signal, name), self._handle)
+        return self
+
+    def _handle(self, signum, frame):
+        name = signal.Signals(signum).name
+        if self.requested:
+            # 정리가 어딘가에서 멈췄을 때를 위한 탈출구
+            print(f"[main] {name} 재수신 — 강제 종료", flush=True)
+            os._exit(1)
+        self.requested = True
+        print(f"\n[main] {name} 수신 — 종료 중 (한 번 더 누르면 강제 종료)", flush=True)
+        if self.httpd is None:
+            raise KeyboardInterrupt             # 서버가 뜨기 전(모델 로딩 등)이면 바로 빠져나간다
+        threading.Thread(target=self.httpd.shutdown, daemon=True).start()
+
+
 def main():
+    shutdown = Shutdown().install()
     try:
         source, source_name = frames.open_source(cfg.VIDEO)
     except (frames.NoVideoError, RuntimeError) as e:
         raise SystemExit(f"프레임 소스를 열 수 없습니다: {e}")
+
+    # 여기서부터 만든 것들은 어떤 경로로 빠져나가든 finally에서 닫는다.
+    # ffmpeg는 Ctrl+C를 같이 받지 않도록 떼어놨으므로(frames.FfmpegSource),
+    # 여기서 안 닫으면 고아 프로세스로 남는다.
     pipeline = frames.Pipeline(source).start()
-
-    publisher = mqttpub.Publisher(cfg.MQTT_HOST, cfg.MQTT_PORT, cfg.MQTT_TOPIC,
-                                  qos=cfg.MQTT_QOS,
-                                  client_id=cfg.MQTT_CLIENT_ID).start()
-
+    publisher = worker = httpd = None
     try:
-        model = det.Detector()
-        worker = DetectionWorker(pipeline, model, publisher).start()
-        print(f"model : {model.path.name} "
-              f"({model.task}, {len(model.names)}클래스, 입력 {model.size[0]}x{model.size[1]})",
+        publisher = mqttpub.Publisher(cfg.MQTT_HOST, cfg.MQTT_PORT, cfg.MQTT_TOPIC,
+                                      qos=cfg.MQTT_QOS,
+                                      client_id=cfg.MQTT_CLIENT_ID).start()
+
+        try:
+            model = det.Detector()
+            worker = DetectionWorker(pipeline, model, publisher).start()
+            print(f"model : {model.path.name} "
+                  f"({model.task}, {len(model.names)}클래스, 입력 {model.size[0]}x{model.size[1]})",
+                  flush=True)
+        except det.NoModelError as e:
+            print(f"model : 없음 — 검출 비활성 ({e})", flush=True)
+
+        Handler.pipeline, Handler.worker, Handler.source_name = pipeline, worker, source_name
+        Handler.publisher = publisher
+
+        print(f"source: {source_name} @ {cfg.CAPTURE_W}x{cfg.CAPTURE_H} "
+              f"{cfg.STREAM_FPS}fps (AI {cfg.AI_FPS}fps)", flush=True)
+        match = "발밑 점" if cfg.ROI_MATCH == "foot" else f"겹침 비율 > {cfg.ROI_OVERLAP_MIN:g}"
+        print(f"roi   : {roistore.ROI_FILE} -> {len(roistore.list_rois())} ROI (판정: {match})",
               flush=True)
-    except det.NoModelError as e:
-        model, worker = None, None
-        print(f"model : 없음 — 검출 비활성 ({e})", flush=True)
-
-    Handler.pipeline, Handler.worker, Handler.source_name = pipeline, worker, source_name
-    Handler.publisher = publisher
-
-    # Windows에서는 SO_REUSEADDR 때문에 두 번째 인스턴스가 같은 포트에
-    # 조용히 바인딩된다. 꺼두면 중복 실행 시 바로 에러가 난다.
-    class Server(ThreadingHTTPServer):
-        allow_reuse_address = False
-        daemon_threads = True
-
-    # Windows에서 localhost는 ::1(IPv6)로 먼저 풀린다. IPv4만 듣고 있으면
-    # 클라이언트가 ::1 시도 -> 실패 -> IPv4 폴백을 거치느라 요청마다
-    # 수백 ms가 붙는다. 듀얼스택으로 열어 IPv6/IPv4를 한 소켓으로 받는다.
-    class DualStackServer(Server):
-        address_family = socket.AF_INET6
-
-        def server_bind(self):
-            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-            super().server_bind()
-
-    print(f"source: {source_name} @ {cfg.CAPTURE_W}x{cfg.CAPTURE_H} "
-          f"{cfg.STREAM_FPS}fps (AI {cfg.AI_FPS}fps)", flush=True)
-    match = "발밑 점" if cfg.ROI_MATCH == "foot" else f"겹침 비율 > {cfg.ROI_OVERLAP_MIN:g}"
-    print(f"roi   : {roistore.ROI_FILE} -> {len(roistore.list_rois())} ROI (판정: {match})",
-          flush=True)
-    print(f"serving http://localhost:{cfg.PORT}", flush=True)
-    try:
-        # OSError를 잡아서 폴백하면 "포트 사용 중" 에러까지 삼켜버리므로,
-        # IPv6 지원 여부는 미리 물어보고 고른다.
-        httpd = (DualStackServer(("::", cfg.PORT), Handler)
-                 if socket.has_dualstack_ipv6()
-                 else Server(("0.0.0.0", cfg.PORT), Handler))
+        print(f"serving http://localhost:{cfg.PORT}", flush=True)
+        try:
+            # OSError를 잡아서 폴백하면 "포트 사용 중" 에러까지 삼켜버리므로,
+            # IPv6 지원 여부는 미리 물어보고 고른다.
+            httpd = (DualStackServer(("::", cfg.PORT), Handler)
+                     if socket.has_dualstack_ipv6()
+                     else Server(("0.0.0.0", cfg.PORT), Handler))
+        except OSError as e:
+            raise SystemExit(f"포트 {cfg.PORT} 바인딩 실패 (이미 실행 중?): {e}")
+        shutdown.httpd = httpd
         httpd.serve_forever()
-    except OSError as e:
-        raise SystemExit(f"포트 {cfg.PORT} 바인딩 실패 (이미 실행 중?): {e}")
     except KeyboardInterrupt:
         pass
     finally:
+        # 받는 쪽부터 닫는다: HTTP -> 추론 -> 캡처(ffmpeg) -> MQTT
+        if httpd is not None:
+            httpd.server_close()
+        if worker is not None:
+            worker.stop()
         pipeline.stop()
-        publisher.stop()
+        if publisher is not None:
+            publisher.stop()
+    print("[main] 정리 완료", flush=True)
 
 
 if __name__ == "__main__":

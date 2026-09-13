@@ -186,7 +186,7 @@ def write_path_hook(py):
     """
     out = subprocess.run(
         [str(py), "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])"],
-        capture_output=True, text=True)
+        capture_output=True, encoding="utf-8", errors="replace")
     site_dir = Path(out.stdout.strip())
     if not site_dir.is_dir():
         return
@@ -232,7 +232,7 @@ ARM_PIP_PACKAGES = ("onnxruntime", "paho-mqtt")
 def check_imports(py, indent):
     """import 되는 것/안 되는 것을 한 줄로 보여주고, 빠진 모듈 목록을 돌려준다."""
     out = subprocess.run([str(py), "-c", IMPORT_CHECK, indent],
-                         capture_output=True, text=True)
+                         capture_output=True, encoding="utf-8", errors="replace")
     say(out.stdout.rstrip() or (indent + "확인 실패"))
     for line in out.stderr.splitlines():
         if line.startswith(MISSING_TAG):
@@ -489,7 +489,7 @@ def camera_status(py):
     if not py.exists():
         return "확인 불가 (.venv 없음)"
     out = subprocess.run([str(py), "-c", CAMERA_CHECK],
-                         capture_output=True, text=True)
+                         capture_output=True, encoding="utf-8", errors="replace")
     return out.stdout.strip() or (out.stderr.strip().splitlines() or ["확인 실패"])[-1]
 
 

@@ -49,7 +49,7 @@
   .scroll::-webkit-scrollbar-thumb:active { background: var(--zone); }
 
   #list { display: flex; flex-direction: column; gap: 2px; flex: 1; }
-  .item { display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  .item { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 10px;
           border-radius: 8px; cursor: pointer; }
   .item:hover { background: var(--fill); }
   .item.sel { background: var(--fill-strong); }
@@ -82,9 +82,33 @@
             flex-direction: column; gap: 3px; }
   #events div { font-size: 11px; color: var(--label-dim); }
   #events b { color: var(--alert); font-weight: 600; }
+  #events .muted { opacity: .5; }
+
+  /* ROI 별 진동 알림 옵션. 두 번째 줄에 두고 스위치 폭(30px)+간격만큼 들여 이름과 맞춘다.
+     한 줄에 넣으면 300px 패널에서 이름이 몇 글자 안 남는다. */
+  .alerts { flex-basis: 100%; display: flex; align-items: center; gap: 4px;
+            padding-left: 38px; font-size: 11px; color: var(--label-dim); }
+  .alerts span { margin-right: 2px; }
+  .alerts button { padding: 1px 8px; border-radius: 8px; font-size: 11px; background: none;
+                   border: 1px solid var(--fill-strong); color: var(--label-dim); }
+  .alerts button.on { background: var(--alert); border-color: var(--alert);
+                      color: #17171a; font-weight: 600; }
   h2 { font-size: 12px; margin: 0; color: var(--label-dim); font-weight: 600; }
   #nav { color: var(--label-dim); font-size: 12px; text-decoration: none; }
   #nav:hover { color: var(--zone); }
+
+  /* 진동 테스트. 버튼 아래 색 줄은 보드 쪽(파랑=왼쪽, 주황=오른쪽, 빨강=양쪽, 노랑=체류). */
+  .vibe-head { display: flex; align-items: center; justify-content: space-between; }
+  #mqtt { font-size: 11px; color: var(--label-dim); }
+  #mqtt.on { color: var(--det); }
+  #vibe { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+  #vibe button { padding: 6px 0; font-size: 12px; box-shadow: inset 0 -2px 0 var(--mark); }
+  #vibe [data-side="left"]  { --mark: #5AA9FF; }
+  #vibe [data-side="right"] { --mark: #FF9F43; }
+  #vibe [data-side="both"]  { --mark: var(--alert); }
+  #vibe [data-kind="dwell"] { --mark: var(--zone); }
+  #vibe-msg { font-size: 11px; color: var(--label-dim); min-height: 15px; word-break: break-all; }
+  #vibe-msg.err { color: var(--alert); }
 </style>
 </head>
 <body>
@@ -106,6 +130,14 @@
   <div id="list" class="scroll"></div>
   <h2>이벤트</h2>
   <div id="events" class="scroll"></div>
+  <div class="vibe-head"><h2>진동 테스트</h2><span id="mqtt">MQTT 확인 중</span></div>
+  <div id="vibe">
+    <button data-kind="fall" data-side="left" title="왼쪽 보드에 낙하 진동 (짧게 6번)">왼쪽</button>
+    <button data-kind="fall" data-side="both" title="양쪽 보드에 낙하 진동 (짧게 6번)">양쪽</button>
+    <button data-kind="fall" data-side="right" title="오른쪽 보드에 낙하 진동 (짧게 6번)">오른쪽</button>
+    <button data-kind="dwell" data-side="both" title="양쪽 보드에 체류 진동 (길게 3번)">체류</button>
+  </div>
+  <div id="vibe-msg">낙하 패턴은 쪽별로, 체류 패턴은 양쪽으로 보냅니다</div>
   <div id="status"></div>
   <a id="nav" href="/analysis">방향 분석 →</a>
 </aside>
@@ -319,7 +351,25 @@ function render() {
       if (selId === roi.id) selId = null;
       reload();
     };
-    el.append(rename, del);
+    // 이벤트는 설정과 무관하게 화면 목록에 남고, 켠 종류만 진동(MQTT)으로 나간다.
+    const alerts = document.createElement('div');
+    alerts.className = 'alerts';
+    const caption = document.createElement('span');
+    caption.textContent = '진동';
+    alerts.append(caption);
+    for (const [key, text, tip] of [
+      ['alert_dwell', '체류', '이 영역에 머무르면 진동'],
+      ['alert_fall', '낙하', '이 영역 안의 사람에게 물건이 떨어지면 진동'],
+    ]) {
+      const b = document.createElement('button');
+      b.className = roi[key] ? 'on' : '';
+      b.textContent = text;
+      b.title = `${tip} — ${roi[key] ? '켜짐' : '꺼짐'}`;
+      b.onclick = e => { e.stopPropagation(); save(roi.id, {[key]: !roi[key]}); };
+      alerts.append(b);
+    }
+
+    el.append(rename, del, alerts);
     $list.append(el);
   }
 }
@@ -474,13 +524,61 @@ async function pollEvents() {
     const el = document.getElementById('events');
     const SIDE_KO = {left: '왼쪽', right: '오른쪽', both: '양쪽'};
     el.innerHTML = events.length
-      ? events.map(e => e.event === 'fall_warning'
-          ? `<div>${e.ts} <b>낙하</b> #${e.track_id} ${e.name} → 사람 #${e.person_id} `
-            + `${SIDE_KO[e.side]} 진동</div>`
-          : `<div>${e.ts} <b>${e.roi_name}</b> `
-            + `#${e.track_id} ${e.name} ${e.dwell}초 체류</div>`).join('')
+      // alert 가 없는 예전 이벤트는 전부 발행됐던 것이라 켜진 것으로 본다.
+      ? events.map(e => {
+          const on = e.alert !== false;
+          const cls = on ? '' : ' class="muted"';
+          if (e.event === 'fall_warning')
+            return `<div${cls}>${e.ts} <b>낙하</b> #${e.track_id} ${e.name} → 사람 #${e.person_id} `
+              + (on ? `${SIDE_KO[e.side]} 진동` : '진동 끔')
+              + (e.roi_name ? ` · ${e.roi_name}` : '') + '</div>';
+          return `<div${cls}>${e.ts} <b>${e.roi_name}</b> `
+            + `#${e.track_id} ${e.name} ${e.dwell}초 체류${on ? ' · 진동' : ''}</div>`;
+        }).join('')
       : '<div>아직 이벤트 없음</div>';
   } catch { /* 무시 */ }
+}
+
+// ---------------------------------------------------------------- 진동 테스트
+// 실제 경보와 같은 형식으로 한 건 보낸다. 보드 배선·VIBE_SIDE·구독 토픽을 확인하는 용도.
+const VIBE_KO = {left: '왼쪽', right: '오른쪽', both: '양쪽'};
+
+document.querySelectorAll('#vibe button').forEach(b => {
+  b.onclick = async () => {
+    const {kind, side} = b.dataset;
+    const $msg = document.getElementById('vibe-msg');
+    b.disabled = true;
+    try {
+      const r = await fetch('/api/test-vibe', {method: 'POST',
+        headers: {'Content-Type': 'application/json'}, body: JSON.stringify({kind, side})});
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
+      $msg.className = '';
+      $msg.textContent = `${d.event.ts} ${kind === 'fall' ? VIBE_KO[side] + ' 낙하' : '양쪽 체류'}`
+                       + ` 진동 보냄 → ${d.topic}`;
+    } catch (e) {
+      $msg.className = 'err';
+      $msg.textContent = `보내지 못함: ${e.message}`;
+    } finally {
+      setTimeout(() => { b.disabled = false; }, 600);   // 연타로 같은 진동이 겹치지 않게
+    }
+  };
+});
+
+function showMqtt(m) {
+  const el = document.getElementById('mqtt');
+  const on = m && m.enabled && m.connected;
+  el.className = on ? 'on' : '';
+  el.textContent = !m || !m.enabled ? `MQTT 꺼짐${m && m.reason ? ' — ' + m.reason : ''}`
+                 : on ? `● ${m.broker} 연결됨` : `○ ${m.broker} 연결 안 됨`;
+}
+
+// 브로커는 앱보다 늦게 뜨거나 중간에 끊길 수 있어 상태를 주기적으로 다시 읽는다.
+async function pollStatus() {
+  try {
+    cfg = await (await fetch('/api/status')).json();
+    showMqtt(cfg.mqtt);
+  } catch { /* 서버 재시작 중 */ }
 }
 
 // ---------------------------------------------------------------- 시작
@@ -488,7 +586,8 @@ new ResizeObserver(resize).observe(img);
 img.onload = resize;
 img.src = '/stream.mjpg?t=' + Date.now();
 reload();
-fetch('/api/status').then(r => r.json()).then(s => { cfg = s; });
+pollStatus();
+setInterval(pollStatus, 3000);
 setInterval(poll, 200);
 setInterval(pollEvents, 1000);
 </script>

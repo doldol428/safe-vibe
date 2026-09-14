@@ -71,7 +71,7 @@ cp arduino_secrets.h.example arduino_secrets.h
 
 QoS 1, retain 없음. `mqttpub.py` 가 보내는 형식:
 
-ROI 체류 — 토픽 `safe-vibe/alert`
+ROI 체류 — 토픽 `safe-vibe/alert`. 서버에서 그 ROI 의 체류 진동(`alert_dwell`)을 켰을 때만 온다(기본 꺼짐).
 
 ```json
 {"ts":"14:03:22","roi_id":1,"roi_name":"입구","track_id":7,
@@ -122,6 +122,12 @@ Windows 방화벽에서 1883 인바운드도 열어야 하며, 규칙의 프로�
 프로필(공용/개인)과 일치해야 적용된다.
 
 ## 동작 확인
+
+가장 쉬운 방법은 앱 화면(`http://<앱 주소>:8080`) 오른쪽 패널의 **진동 테스트** 버튼이다.
+`왼쪽` / `오른쪽` 은 그쪽 보드만, `양쪽` 은 두 보드 모두 낙하 패턴(짧게 6번)으로,
+`체류` 는 두 보드 모두 체류 패턴(길게 3번)으로 울린다. 패널 제목 옆에 브로커 연결 상태가 보인다.
+
+명령줄로 직접 쏠 수도 있다.
 
 ```
 mosquitto_pub -h 172.30.6.222 -t safe-vibe/alert -q 1 \

@@ -6,7 +6,10 @@ import json
 import os
 import threading
 
-from config import (DEFAULT_ROI_NAME, MAX_NAME, MAX_POINTS, MAX_ROI, ROI_FILE)
+from config import (DEFAULT_ALERT_DWELL, DEFAULT_ALERT_FALL, DEFAULT_ROI_NAME,
+                    MAX_NAME, MAX_POINTS, MAX_ROI, ROI_FILE)
+
+UPDATABLE = ("name", "enabled", "points", "alert_dwell", "alert_fall")
 
 _lock = threading.Lock()
 
@@ -34,6 +37,8 @@ def _clean_roi(raw, roi_id):
         "name": str(raw.get("name") or DEFAULT_ROI_NAME)[:MAX_NAME],
         "enabled": bool(raw.get("enabled", True)),
         "points": _clean_points(raw.get("points")),
+        "alert_dwell": bool(raw.get("alert_dwell", DEFAULT_ALERT_DWELL)),
+        "alert_fall": bool(raw.get("alert_fall", DEFAULT_ALERT_FALL)),
     }
 
 
@@ -84,8 +89,7 @@ def update_roi(roi_id, body):
         for i, roi in enumerate(store["rois"]):
             if roi["id"] != roi_id:
                 continue
-            merged = {**roi, **{k: body[k] for k in ("name", "enabled", "points")
-                                if k in body}}
+            merged = {**roi, **{k: body[k] for k in UPDATABLE if k in body}}
             store["rois"][i] = _clean_roi(merged, roi_id)
             save_store(store)
             return store["rois"][i], None

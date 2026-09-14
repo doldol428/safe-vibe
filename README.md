@@ -95,6 +95,7 @@ STREAM_W=640 AI_FPS=2 CONF_THRESHOLD=0.45 python app.py
 | `GET /api/events`                                   | 최근 체류 이벤트                 |
 | `GET /api/status`                                   | 소스·모델·트래커 설정 요약     |
 | `GET/POST /api/rois`, `PUT/DELETE /api/rois/{id}` | ROI 관리                         |
+| `POST /api/test-vibe`                               | 진동 테스트 발행 `{"kind": "fall"\|"dwell", "side": "left"\|"right"\|"both"}` |
 | `GET /analysis`                                     | 방향 분석 페이지                 |
 | `GET /api/analysis`                                 | 사람 트랙별 관절점, 방향 판정 근거, 방향 이력 |
 
@@ -133,6 +134,26 @@ mkdir -p model/pose && mv yolov8n-pose.onnx model/pose/
 - 지금 기준값은 뒷모습/오른쪽을 보는 영상으로만 확인했다. 정면·왼쪽 장면에서 틀리면
   `FACING_SIDE_RATIO` / `FACING_HEAD_RATIO` / `KP_CONF` 부터 조정한다.
 
+## ROI 별 진동 알림
+
+이벤트는 전부 화면 이벤트 목록에 남는다. 그중 **진동(MQTT 발행)으로 내보낼 종류를 ROI 마다
+고른다.** ROI 목록 두 번째 줄의 `체류` / `낙하` 버튼으로 켜고 끄며, `roi.json` 에 저장된다.
+
+| 필드 | 기본값 | 켜면 |
+|---|---|---|
+| `alert_dwell` | 끔 | 이 ROI 에 `DWELL_SEC` 이상 머무르면(체류/침입) 진동 |
+| `alert_fall` | 켬 | 이 ROI 안에 선 사람에게 물건이 떨어지면 진동 |
+
+기본값은 `config.py` 의 `DEFAULT_ALERT_DWELL` / `DEFAULT_ALERT_FALL` 이다. 필드가 없는 예전
+`roi.json` 도 이 값으로 읽힌다 — 즉 업데이트하면 **체류 진동은 꺼진 상태로 시작한다.**
+
+- 기본값 그대로 두면 그 ROI 는 "낙하일 때만 진동"이다.
+- 낙하는 **사람 박스**가 어느 ROI 에 걸렸는지로 본다(`ROI_MATCH` 판정 그대로). 겹친 ROI 중
+  하나라도 `alert_fall` 이 켜져 있으면 울린다.
+- 어느 ROI 에도 없는 사람의 낙하는 설정과 무관하게 울린다. ROI 를 그리지 않은 화면에서도
+  낙하는 경보여야 하기 때문이다. 특정 구역만 낙하 진동을 끄려면 그 구역을 ROI 로 그리고 `낙하` 를 끈다.
+- 꺼서 발행되지 않은 이벤트는 `"alert": false` 로 `/api/events` 에 남고, 화면에서 흐리게 보인다.
+
 ## 낙하 경보 (좌/우 진동)
 
 `box` 트랙이 아래로 빠르게 움직이면 떨어지는 것으로 보고, 가장 가까운 사람의
@@ -159,7 +180,7 @@ VIDEO=video/converted/falling_box_slow.mp4 .venv/bin/python app.py
 
 | 토픽 | 받는 보드 | 내용 |
 |---|---|---|
-| `safe-vibe/alert` | 전부 | ROI 체류, 양쪽 낙하 |
+| `safe-vibe/alert` | 전부 | ROI 체류(체류 진동을 켠 ROI 만), 양쪽 낙하 |
 | `safe-vibe/alert/left` | `VIBE_SIDE "left"` | 왼쪽 낙하 |
 | `safe-vibe/alert/right` | `VIBE_SIDE "right"` | 오른쪽 낙하 |
 
@@ -327,6 +348,7 @@ Pi 5 CPU 기준으로 추론 3~5fps, 화면 10~15fps가 현실적인 균형점�
 - `python setup.py --check` — 환경이 그대로인지
 - 앱 실행 후 브라우저에서 스트림이 뜨고 검출 박스가 그려지는지
 - ROI를 그리고 그 안에 `DWELL_SEC` 이상 머물렀을 때 이벤트가 한 번만 뜨는지
+- ROI 의 `체류` 진동을 끈 상태에서 콘솔에 `(알림 끔)` 이 붙고 발행되지 않는지
 - 콘솔에 `[event]` 가 찍히고, 브로커가 있으면 `[mqtt] 연결됨` 이후 구독 쪽에 도달하는지
 
 ## 라이선스

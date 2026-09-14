@@ -1,6 +1,7 @@
 """ROI 체류 이벤트를 MQTT로 내보낸다.
 
     DetectionWorker -> Publisher.publish(event) -> safe-vibe/alert          (ROI 체류, 양쪽 낙하)
+      (ROI 의 alert_dwell / alert_fall 이 꺼진 이벤트는 여기까지 오지 않는다)
                                                 -> safe-vibe/alert/left     (왼쪽 낙하)
                                                 -> safe-vibe/alert/right    (오른쪽 낙하)
 

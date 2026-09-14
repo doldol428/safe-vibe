@@ -139,3 +139,9 @@ MAX_ROI = _int("MAX_ROI", 10)        # 한 화면에 둘 수 있는 검출 영�
 MAX_POINTS = _int("MAX_POINTS", 30)  # 폴리곤 꼭짓점 수 상한
 MAX_NAME = _int("MAX_NAME", 50)      # ROI 이름 길이 상한
 DEFAULT_ROI_NAME = "New Zone"
+# ROI 마다 어떤 이벤트로 진동 알림(MQTT 발행)을 낼지. 화면 이벤트 목록에는 설정과 무관하게 남는다.
+# 새로 만든 ROI 와, 이 필드가 없던 예전 roi.json 의 ROI 가 이 값으로 시작한다.
+#   alert_dwell : 체류/침입. 사람이 지나다니는 구역이면 계속 울려서 기본은 끈다.
+#   alert_fall  : 이 ROI 안에 있는 사람에게 떨어지는 낙하. ROI 밖 사람은 설정과 무관하게 울린다.
+DEFAULT_ALERT_DWELL = False
+DEFAULT_ALERT_FALL = True

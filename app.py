@@ -124,8 +124,11 @@ class DetectionWorker:
             now = time.monotonic()
             tracks = self.tracker.update(results, now)
             pose_ms = self._pose(frame, tracks, now)
-            self._match_falls(tracks, now)
-            self._match_rois(tracks, now)
+            # 낙하와 체류가 같은 ROI 설정(알림 옵션)을 보도록 한 주기에 한 번만 읽는다.
+            rois = [r for r in roistore.list_rois()
+                    if r["enabled"] and len(r["points"]) >= 3]
+            self._match_falls(tracks, now, rois)
+            self._match_rois(tracks, now, rois)
 
             self.meter.tick()
             with self.lock:
@@ -151,17 +154,23 @@ class DetectionWorker:
             return None
         return (time.perf_counter() - t0) * 1000
 
-    def _match_falls(self, tracks, now):
+    def _match_falls(self, tracks, now, rois):
         """떨어지는 박스를 찾아 가까운 사람의 왼쪽/오른쪽 진동 클라이언트로 경보를 낸다.
 
         판정은 fall.py 가 하고, 여기서는 같은 사람에게 연달아 울리지 않게 거르고 발행만 한다.
         pose 가 먼저 돌아야 사람 방향이 채워져 있으므로 _pose() 다음에 부른다.
+
+        알림 여부는 사람이 서 있는 ROI 의 alert_fall 로 정한다. 겹친 ROI 중 하나라도 켜져
+        있으면 울린다. 어느 ROI 에도 없으면 울린다 — ROI 를 안 그린 화면에서도 낙하는 경보여야 한다.
         """
         new_events = []
         for box, person, j in fall.detect(tracks):
             if now - self.fall_last.get(person.id, float("-inf")) < cfg.FALL_COOLDOWN_SEC:
                 continue
             self.fall_last[person.id] = now
+            inside = [r for r in rois if self._in_roi(person.box, r["points"])]
+            alerting = [r for r in inside if r["alert_fall"]]
+            roi = (alerting or inside or [None])[0]
             new_events.append({
                 "event": "fall_warning",
                 "ts": time.strftime("%H:%M:%S"),
@@ -170,6 +179,9 @@ class DetectionWorker:
                 "name": box.name,
                 "person_id": person.id,
                 **j,
+                "roi_id": roi["id"] if roi else None,
+                "roi_name": roi["name"] if roi else None,
+                "alert": bool(alerting) or not inside,
             })
 
         with self.lock:
@@ -177,9 +189,14 @@ class DetectionWorker:
                 self.events.appendleft(event)
 
         for e in new_events:
+            where = f", ROI {e['roi_name']}" if e["roi_name"] else ""
+            action = (f"{fall.SIDE_KO[e['side']]} 진동" if e["alert"]
+                      else "알림 끔 (ROI 설정)")
             print(f"[fall] #{e['track_id']} {e['name']} 낙하 -> 사람 #{e['person_id']} "
-                  f"{fall.SIDE_KO[e['side']]} 진동 (화면 {e['screen_side']}, "
-                  f"방향 {e['facing']}, 근거 {e['basis']}, {e['speed']}/s)", flush=True)
+                  f"{action} (화면 {e['screen_side']}, "
+                  f"방향 {e['facing']}, 근거 {e['basis']}, {e['speed']}/s{where})", flush=True)
+            if not e["alert"]:
+                continue
             # 양쪽이면 공통 토픽으로 보내 두 보드가 다 받게 한다.
             self.publisher.publish(e, subtopic=None if e["side"] == "both" else e["side"])
 
@@ -191,15 +208,14 @@ class DetectionWorker:
             return roistore.point_in_polygon((x1 + x2) / 2, y2, points)
         return roistore.box_overlap_ratio(box, points) > cfg.ROI_OVERLAP_MIN
 
-    def _match_rois(self, tracks, now):
+    def _match_rois(self, tracks, now, rois):
         """트랙 박스가 ROI 에 걸리면(_in_roi) 그 ROI 안에 있는 것으로 본다.
 
         트랙 ID가 있으므로 "같은 사람이 계속 있는 것"과 "새로 들어온 것"을 구분할 수
         있다. 이벤트는 (트랙, ROI) 조합마다 체류 DWELL_SEC를 넘길 때 한 번만 낸다.
+        이벤트는 항상 화면 목록에 남기고, 진동 알림(MQTT)은 ROI 의 alert_dwell 이 켜졌을 때만 낸다.
         """
-        rois = [r for r in roistore.list_rois()
-                if r["enabled"] and len(r["points"]) >= 3]
-        names = {r["id"]: r["name"] for r in rois}
+        by_id = {r["id"]: r for r in rois}
         hits = {r["id"]: 0 for r in rois}
         fired = []
 
@@ -237,10 +253,11 @@ class DetectionWorker:
                     "event": "roi_dwell",
                     "ts": time.strftime("%H:%M:%S"),
                     "roi_id": rid,
-                    "roi_name": names.get(rid, "?"),
+                    "roi_name": by_id[rid]["name"],
                     "track_id": t.id,
                     "name": t.name,
                     "dwell": round(now - t.roi_since[rid], 1),
+                    "alert": by_id[rid]["alert_dwell"],
                 }
                 self.events.appendleft(event)
                 new_events.append(event)
@@ -249,8 +266,10 @@ class DetectionWorker:
         # /api/detections 응답까지 같이 밀린다.
         for event in new_events:
             print(f"[event] {event['roi_name']} — #{event['track_id']} {event['name']} "
-                  f"{cfg.DWELL_SEC}초 이상 체류", flush=True)
-            self.publisher.publish(event)
+                  f"{cfg.DWELL_SEC}초 이상 체류"
+                  f"{'' if event['alert'] else ' (알림 끔)'}", flush=True)
+            if event["alert"]:
+                self.publisher.publish(event)
 
 
 # ---------------------------------------------------------------- HTTP
@@ -303,6 +322,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):
+        if self.path == "/api/test-vibe":
+            return self.test_vibe()
         if self.path != "/api/rois":
             return self.send_error(404)
         try:
@@ -351,6 +372,50 @@ class Handler(BaseHTTPRequestHandler):
                           else f"overlap > {cfg.ROI_OVERLAP_MIN:g}"),
             "mqtt": self.publisher.status() if self.publisher else {"enabled": False},
         }
+
+    def test_vibe(self):
+        """진동 클라이언트 배선·구독 확인용. 실제 경보와 같은 형식으로 한 건 발행한다.
+
+        kind  fall  -> fall_warning 을 side 토픽으로 (left/right, both 는 공통 토픽). 낙하 패턴
+              dwell -> roi_dwell 을 공통 토픽으로 (양쪽 보드). 체류 패턴
+        보드는 (track_id, roi_id) 로 3초간 중복을 거르므로 누를 때마다 새 track_id 를 준다.
+        화면 이벤트 목록과 분석 페이지 낙하 목록에는 남기지 않는다 — 감시 기록이 아니다.
+        """
+        try:
+            body = self._body()
+        except (ValueError, json.JSONDecodeError):
+            return self._json({"error": "JSON 형식이 아닙니다"}, 400)
+        kind, side = body.get("kind", "fall"), body.get("side", "both")
+        if kind not in ("fall", "dwell") or side not in ("left", "right", "both"):
+            return self._json({"error": "kind 는 fall|dwell, side 는 left|right|both"}, 400)
+
+        mqtt = self.publisher.status() if self.publisher else {"enabled": False,
+                                                               "reason": "MQTT 없음"}
+        if not mqtt["enabled"]:
+            return self._json({"error": f"MQTT 꺼짐 — {mqtt.get('reason')}"}, 503)
+        if not mqtt["connected"]:
+            return self._json({"error": f"브로커 {mqtt['broker']} 에 연결되지 않았습니다"}, 503)
+
+        track_id = int(time.time() * 1000) % 1_000_000_000   # 보드의 long(32bit) 안에 든다
+        common = {"test": True, "ts": time.strftime("%H:%M:%S"), "track_id": track_id,
+                  "name": "테스트"}
+        if kind == "fall":
+            event = {"event": "fall_warning", **common, "person_id": 0, "side": side,
+                     "screen_side": side, "basis": "test"}
+            subtopic = None if side == "both" else side
+        else:
+            event = {"event": "roi_dwell", **common, "roi_id": 0, "roi_name": "진동 테스트",
+                     "dwell": 0.0}
+            subtopic = None
+        topic = f"{self.publisher.topic}/{subtopic}" if subtopic else self.publisher.topic
+
+        ok = self.publisher.publish(event, subtopic=subtopic)
+        print(f"[test] 진동 테스트 {kind} {side} -> {topic} ({'발행' if ok else '실패'})",
+              flush=True)
+        if not ok:
+            return self._json({"error": f"발행 실패 — {self.publisher.last_error}",
+                               "topic": topic}, 502)
+        self._json({"published": True, "topic": topic, "event": event})
 
     def analysis(self):
         """분석 페이지용. 사람 트랙마다 관절점, 방향 판정 근거, 최근 방향 이력을 준다."""

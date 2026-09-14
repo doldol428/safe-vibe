@@ -27,6 +27,7 @@ import config as cfg
 import detector as det
 import fall
 import frames
+import head
 import mqttpub
 import pose
 import roistore
@@ -58,6 +59,11 @@ class DetectionWorker:
         self.pose_ms = None             # 이번 주기에 pose 를 안 돌렸으면 None
         self.falling_boxes = []         # 지금 떨어지는 중인 트랙 (화면 표시용)
         self.fall_last = {}             # 사람 트랙 id -> 마지막 낙하 경보 시각
+        self.head_last = {}             # 사람 트랙 id -> 마지막 머리 근접 경보 시각
+        # 사람 트랙 id -> 마지막으로 진동(발행)을 실제로 보낸 시각. 떨어지는 박스는 낙하와 머리
+        # 근접을 둘 다 만족하므로 한쪽이 울렸으면 다른 쪽은 건너뛴다. ROI 설정으로 알림이 꺼져
+        # 발행하지 않은 경보는 세지 않는다 — 안 울린 경보가 다른 경보를 막으면 안 된다.
+        self.alert_last = {}
         self.meter = frames.FpsMeter()
         self.events = deque(maxlen=cfg.EVENT_LOG_SIZE)
         self._stop = threading.Event()
@@ -128,6 +134,7 @@ class DetectionWorker:
             rois = [r for r in roistore.list_rois()
                     if r["enabled"] and len(r["points"]) >= 3]
             self._match_falls(tracks, now, rois)
+            self._match_head(tracks, now, rois)  # 낙하 다음 — 방금 낙하로 울린 사람은 건너뛴다
             self._match_rois(tracks, now, rois)
 
             self.meter.tick()
@@ -167,6 +174,10 @@ class DetectionWorker:
         for box, person, j in fall.detect(tracks):
             if now - self.fall_last.get(person.id, float("-inf")) < cfg.FALL_COOLDOWN_SEC:
                 continue
+            # 떨어지는 박스는 머리 근처도 지난다. 머리 근접(_match_head)으로 방금 진동이
+            # 나갔으면 같은 사건이므로 건너뛴다 — 한 번 떨어진 박스로 진동이 두 번 오지 않게.
+            if now - self.alert_last.get(person.id, float("-inf")) < cfg.FALL_COOLDOWN_SEC:
+                continue
             self.fall_last[person.id] = now
             inside = [r for r in rois if self._in_roi(person.box, r["points"])]
             alerting = [r for r in inside if r["alert_fall"]]
@@ -197,8 +208,57 @@ class DetectionWorker:
                   f"방향 {e['facing']}, 근거 {e['basis']}, {e['speed']}/s{where})", flush=True)
             if not e["alert"]:
                 continue
+            self.alert_last[e["person_id"]] = now
             # 양쪽이면 공통 토픽으로 보내 두 보드가 다 받게 한다.
             self.publisher.publish(e, subtopic=None if e["side"] == "both" else e["side"])
+
+    def _match_head(self, tracks, now, rois):
+        """움직이는 박스가 사람 머리 주변에 들어오면 양쪽 진동으로 경보한다 (좌/우 판단 없음).
+
+        판정은 head.py. 알림 여부는 낙하와 같은 방식으로 사람이 선 ROI 의 alert_head 로 정한다.
+        겹친 ROI 중 하나라도 켜져 있으면 울리고, 어느 ROI 에도 없으면 울린다.
+        같은 사람에게 방금 진동(낙하 포함)이 나갔으면 건너뛴다 — 떨어지는 박스는 머리 근처도
+        지나므로, 안 거르면 한 번 떨어진 박스로 진동이 두 번 온다.
+        """
+        if not cfg.HEAD_NEAR:
+            return
+        new_events = []
+        for box, person, j in head.detect(tracks):
+            if now - self.head_last.get(person.id, float("-inf")) < cfg.HEAD_COOLDOWN_SEC:
+                continue
+            if now - self.alert_last.get(person.id, float("-inf")) < cfg.HEAD_COOLDOWN_SEC:
+                continue
+            self.head_last[person.id] = now
+            inside = [r for r in rois if self._in_roi(person.box, r["points"])]
+            alerting = [r for r in inside if r["alert_head"]]
+            roi = (alerting or inside or [None])[0]
+            new_events.append({
+                "event": "box_near_head",
+                "ts": time.strftime("%H:%M:%S"),
+                "ts_epoch": round(time.time(), 3),
+                "track_id": box.id,
+                "name": box.name,
+                "person_id": person.id,
+                "side": "both",
+                **j,
+                "roi_id": roi["id"] if roi else None,
+                "roi_name": roi["name"] if roi else None,
+                "alert": bool(alerting) or not inside,
+            })
+
+        with self.lock:
+            for event in new_events:
+                self.events.appendleft(event)
+
+        for e in new_events:
+            where = f", ROI {e['roi_name']}" if e["roi_name"] else ""
+            action = "양쪽 진동" if e["alert"] else "알림 끔 (ROI 설정)"
+            print(f"[head] #{e['track_id']} {e['name']} 머리 근접 -> 사람 #{e['person_id']} "
+                  f"{action} (이동 {e['move']}, {e['speed']}/s{where})", flush=True)
+            if not e["alert"]:
+                continue
+            self.alert_last[e["person_id"]] = now
+            self.publisher.publish(e)           # 공통 토픽 = 두 보드 모두
 
     @staticmethod
     def _in_roi(box, points):
@@ -378,6 +438,7 @@ class Handler(BaseHTTPRequestHandler):
 
         kind  fall  -> fall_warning 을 side 토픽으로 (left/right, both 는 공통 토픽). 낙하 패턴
               dwell -> roi_dwell 을 공통 토픽으로 (양쪽 보드). 체류 패턴
+              head  -> box_near_head 를 공통 토픽으로 (양쪽 보드). 낙하 패턴
         보드는 (track_id, roi_id) 로 3초간 중복을 거르므로 누를 때마다 새 track_id 를 준다.
         화면 이벤트 목록과 분석 페이지 낙하 목록에는 남기지 않는다 — 감시 기록이 아니다.
         """
@@ -386,8 +447,8 @@ class Handler(BaseHTTPRequestHandler):
         except (ValueError, json.JSONDecodeError):
             return self._json({"error": "JSON 형식이 아닙니다"}, 400)
         kind, side = body.get("kind", "fall"), body.get("side", "both")
-        if kind not in ("fall", "dwell") or side not in ("left", "right", "both"):
-            return self._json({"error": "kind 는 fall|dwell, side 는 left|right|both"}, 400)
+        if kind not in ("fall", "dwell", "head") or side not in ("left", "right", "both"):
+            return self._json({"error": "kind 는 fall|dwell|head, side 는 left|right|both"}, 400)
 
         mqtt = self.publisher.status() if self.publisher else {"enabled": False,
                                                                "reason": "MQTT 없음"}
@@ -403,6 +464,10 @@ class Handler(BaseHTTPRequestHandler):
             event = {"event": "fall_warning", **common, "person_id": 0, "side": side,
                      "screen_side": side, "basis": "test"}
             subtopic = None if side == "both" else side
+        elif kind == "head":
+            event = {"event": "box_near_head", **common, "person_id": 0, "side": "both",
+                     "move": 0.0, "speed": 0.0}
+            subtopic = None
         else:
             event = {"event": "roi_dwell", **common, "roi_id": 0, "roi_name": "진동 테스트",
                      "dwell": 0.0}

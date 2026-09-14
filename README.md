@@ -95,7 +95,7 @@ STREAM_W=640 AI_FPS=2 CONF_THRESHOLD=0.45 python app.py
 | `GET /api/events`                                   | 최근 체류 이벤트                 |
 | `GET /api/status`                                   | 소스·모델·트래커 설정 요약     |
 | `GET/POST /api/rois`, `PUT/DELETE /api/rois/{id}` | ROI 관리                         |
-| `POST /api/test-vibe`                               | 진동 테스트 발행 `{"kind": "fall"\|"dwell", "side": "left"\|"right"\|"both"}` |
+| `POST /api/test-vibe`                               | 진동 테스트 발행 `{"kind": "fall"\|"dwell"\|"head", "side": "left"\|"right"\|"both"}` |
 | `GET /analysis`                                     | 방향 분석 페이지                 |
 | `GET /api/analysis`                                 | 사람 트랙별 관절점, 방향 판정 근거, 방향 이력 |
 
@@ -143,13 +143,16 @@ mkdir -p model/pose && mv yolov8n-pose.onnx model/pose/
 |---|---|---|
 | `alert_dwell` | 끔 | 이 ROI 에 `DWELL_SEC` 이상 머무르면(체류/침입) 진동 |
 | `alert_fall` | 켬 | 이 ROI 안에 선 사람에게 물건이 떨어지면 진동 |
+| `alert_head` | 켬 | 이 ROI 안에 선 사람 머리 근처로 움직이는 박스가 오면 양쪽 진동 |
 
-기본값은 `config.py` 의 `DEFAULT_ALERT_DWELL` / `DEFAULT_ALERT_FALL` 이다. 필드가 없는 예전
+기본값은 `config.py` 의 `DEFAULT_ALERT_DWELL` / `DEFAULT_ALERT_FALL` / `DEFAULT_ALERT_HEAD` 이다. 필드가 없는 예전
 `roi.json` 도 이 값으로 읽힌다 — 즉 업데이트하면 **체류 진동은 꺼진 상태로 시작한다.**
 
 - 기본값 그대로 두면 그 ROI 는 "낙하일 때만 진동"이다.
 - 낙하는 **사람 박스**가 어느 ROI 에 걸렸는지로 본다(`ROI_MATCH` 판정 그대로). 겹친 ROI 중
-  하나라도 `alert_fall` 이 켜져 있으면 울린다.
+  하나라도 `alert_fall` 이 켜져 있으면 울린다. 머리 근접(`alert_head`)도 같은 방식이다.
+- 낙하와 머리 근접은 같은 사건(떨어지는 박스)으로 둘 다 걸릴 수 있어, 같은 사람에게 **실제로 진동이
+  나간** 뒤에는 다른 쪽을 건너뛴다. ROI 설정으로 꺼져 발행하지 않은 경보는 다른 경보를 막지 않는다.
 - 어느 ROI 에도 없는 사람의 낙하는 설정과 무관하게 울린다. ROI 를 그리지 않은 화면에서도
   낙하는 경보여야 하기 때문이다. 특정 구역만 낙하 진동을 끄려면 그 구역을 ROI 로 그리고 `낙하` 를 끈다.
 - 꺼서 발행되지 않은 이벤트는 `"alert": false` 로 `/api/events` 에 남고, 화면에서 흐리게 보인다.
@@ -196,6 +199,34 @@ VIDEO=video/converted/falling_box_slow.mp4 .venv/bin/python app.py
   낙하는 1초도 안 걸린다. 검출과 pose 가 같이 돌면 이 PC 에서 한 주기에 100ms 남짓이다.
 - 떨어지는 동안 사람 머리와 겹치면 박스 검출이 끊긴다. 그래서 겹치기 전, 떨어지기 시작한
   직후의 움직임으로 판정한다.
+
+## 머리 근접 경보 (양쪽 진동)
+
+낙하 경보보다 단순한 규칙이다. **움직이는 박스가 사람 머리 주변에 들어오면** 좌/우를 가리지
+않고 양쪽 보드를 울린다 (`head.py`, 이벤트 `box_near_head`, 공통 토픽).
+
+| 단계 | 기준 |
+|---|---|
+| 머리 영역 | 사람 박스 윗변 기준. 가로는 몸 중심 ± 폭 × `HEAD_ZONE_W`(1.0), 세로는 윗변 위 키 × `HEAD_ZONE_UP`(0.5) ~ 아래 키 × `HEAD_ZONE_DOWN`(0.25) |
+| 움직이는 박스 | 최근 `HEAD_WINDOW_SEC`(1초) 동안 `HEAD_MIN_MOVE`(0.05) 이상, 직전 속도 `HEAD_MIN_SPEED`(0.12/s) 이상. 방향은 보지 않는다 |
+| 겹침 | 박스와 머리 영역이 조금이라도 겹치면 근접 |
+| 한 번만 | (박스, 사람) 쌍마다 한 번, 같은 사람에게는 `HEAD_COOLDOWN_SEC`(3초)에 한 번 |
+
+**움직이는 박스만 보는 이유.** 선반에 쌓인 박스도 화면에서는 머리 옆에 걸린다. 게다가 사람이
+선반 앞을 지나면 뒤의 박스가 가려져 검출 박스 중심이 0.03~0.04 흔들린다(낙하 없는 영상 3편
+최대 0.043). 그래서 기준을 그보다 높게 잡았다.
+
+**낙하 경보와의 관계.** 떨어지는 박스는 머리 근처도 지나므로 둘 다 조건을 만족한다. 같은 사람에게
+한쪽 경보가 방금 나갔으면 다른 쪽은 건너뛴다 — 한 사건에 진동은 한 번이다. 기준 영상
+(`falling_box_slow`)에서는 두 판정이 같은 추론 주기에 걸려 낙하 경보(몸 기준 좌/우)가 나간다.
+`HEAD_NEAR=0` 이면 머리 근접만 끈다. 구역별로 끄려면 ROI 목록의 `머리` 버튼(`alert_head`)을 쓴다.
+
+**한계 — 옆에서 던진 박스는 못 잡는다.** `thrown_box_slow` 의 박스는 사람 몸 중심에서 사람 폭의
+3배 넘게 떨어진 곳(2.6초)에서 검출이 끊기고, 머리에 닿는 3초 무렵에는 기울어진 박스를 모델이 보지
+못한다. 영역을 그만큼 넓히면 가려짐으로 흔들리는 선반 박스까지 걸린다. 날아오는 박스는 궤적 예측이나
+그런 장면을 넣은 재학습이 필요하다 (`training/README.md`).
+
+진동 보드는 `box_near_head` 를 받도록 스케치를 새로 올려야 한다 (`safe-vibe-client/README.md`).
 
 ## 라즈베리파이
 

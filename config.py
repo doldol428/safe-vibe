@@ -122,6 +122,25 @@ FALL_PROFILE_RATIO = _float("FALL_PROFILE_RATIO", 0.15)
 # 떨어지는 동안 박스 검출이 끊겨 새 트랙으로 다시 잡혀도, 같은 사람에게는 이만큼 한 번만 울린다.
 FALL_COOLDOWN_SEC = _float("FALL_COOLDOWN_SEC", 3)
 
+# ---------------------------------------------------------------- 머리 근접 경보
+# 움직이는 HEAD_CLASS 박스가 사람 머리 주변 영역에 들어오면 양쪽 진동으로 경보한다 (head.py).
+# 낙하 경보와 달리 방향(좌/우)도, '아래로 떨어지는지'도 보지 않는다. 옆에서 던진 박스처럼
+# fall.py 에 안 걸리는 경우를 받치려는 단순한 규칙이다. 0 이면 끈다.
+HEAD_NEAR = _int("HEAD_NEAR", 1)
+HEAD_CLASS = os.environ.get("HEAD_CLASS", "box")
+# 머리 영역. 사람 박스 윗변 기준이고 단위는 사람 폭/키의 배수다.
+HEAD_ZONE_W = _float("HEAD_ZONE_W", 1.0)        # 몸 중심에서 좌우로 사람 폭의 몇 배까지
+HEAD_ZONE_UP = _float("HEAD_ZONE_UP", 0.5)      # 윗변 위로 키의 몇 배까지
+HEAD_ZONE_DOWN = _float("HEAD_ZONE_DOWN", 0.25)  # 윗변 아래로 키의 몇 배까지 (얼굴·어깨)
+# '움직이는' 박스만 본다. 선반에 쌓인 박스도 화면에서는 머리 옆에 걸리기 때문이다.
+# 거리·속도는 화면 높이 단위이고 가로는 화면 비율을 곱해 같은 척도로 잰다.
+HEAD_WINDOW_SEC = _float("HEAD_WINDOW_SEC", 1.0)
+# 사람이 선반 앞을 지나면 뒤의 박스가 가려지면서 검출 박스가 줄어 중심이 0.03~0.04 흔들린다
+# (낙하 없는 카톡 영상 3편 최대 0.043). 떨어지는 박스는 판정 시점에 0.057~0.072, 0.15/s 이상.
+HEAD_MIN_MOVE = _float("HEAD_MIN_MOVE", 0.05)   # 최근 HEAD_WINDOW_SEC 동안 움직인 거리
+HEAD_MIN_SPEED = _float("HEAD_MIN_SPEED", 0.12)  # 직전 구간 속도 (화면 높이/초)
+HEAD_COOLDOWN_SEC = _float("HEAD_COOLDOWN_SEC", 3)   # 같은 사람에게 다시 울리기까지
+
 # ---------------------------------------------------------------- MQTT
 # 이벤트를 외부로 내보낸다. 기본값은 같은 장비의 브로커(mosquitto)다.
 # 브로커가 없어도 앱은 그대로 돈다 — 연결만 계속 재시도하고 이벤트는 버린다.
@@ -145,3 +164,5 @@ DEFAULT_ROI_NAME = "New Zone"
 #   alert_fall  : 이 ROI 안에 있는 사람에게 떨어지는 낙하. ROI 밖 사람은 설정과 무관하게 울린다.
 DEFAULT_ALERT_DWELL = False
 DEFAULT_ALERT_FALL = True
+#   alert_head  : 이 ROI 안에 있는 사람 머리 근처로 움직이는 박스가 오면. ROI 밖 사람은 설정과 무관하게 울린다.
+DEFAULT_ALERT_HEAD = True

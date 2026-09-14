@@ -12,6 +12,8 @@
  *                  "track_id":7,"name":"person","dwell":2.1,"ts_epoch":1788504449.5}
  *   fall_warning  {"event":"fall_warning","track_id":41,"name":"box","person_id":3,
  *                  "side":"right","screen_side":"right","basis":"back",...}
+ *   box_near_head {"event":"box_near_head","track_id":41,"name":"box","person_id":3,
+ *                  "side":"both","move":0.07,"speed":0.15}   (공통 토픽, 양쪽 보드)
  *
  * 몸의 왼쪽/오른쪽에 한 대씩 달 때도 스케치는 하나다. 두 보드에 그대로 올리고
  * arduino_secrets.h 의 VIBE_SIDE 만 "left" / "right" 로 다르게 준다.
@@ -74,6 +76,8 @@ const Pattern FALL_PATTERN  = { 6, 120, 60 };
 const unsigned long DEDUP_MS = 3000;
 // 낙하 경보에는 roi_id 가 없다. ROI id 는 1부터라 겹치지 않는 값을 키로 쓴다.
 const long FALL_DEDUP_KEY = -2;
+// 머리 근접 경보도 roi_id 가 없다. 같은 박스 트랙으로 낙하와 머리 근접이 둘 다 올 수 있어 키를 따로 둔다.
+const long HEAD_DEDUP_KEY = -3;
 
 const unsigned long RECONNECT_MS = 3000;   // MQTT 재접속 간격
 
@@ -220,6 +224,30 @@ void handleFall(JsonDocument& doc) {
   startVibration(FALL_PATTERN);
 }
 
+// 움직이는 박스가 사람 머리 근처에 들어옴. 서버가 좌/우를 가리지 않고 공통 토픽으로 보내므로
+// 쪽 확인 없이 울린다. 위험의 성격이 낙하와 같아 같은 패턴(짧고 급하게)을 쓴다.
+void handleHead(JsonDocument& doc) {
+  const char* cls      = doc["name"]      | "?";
+  long        trackId  = doc["track_id"]  | -1L;
+  long        personId = doc["person_id"] | -1L;
+
+  if (isDuplicate(trackId, HEAD_DEDUP_KEY)) {
+    Serial.print("[head] 중복 무시 — #");
+    Serial.println(trackId);
+    return;
+  }
+
+  Serial.print("[head] ");
+  Serial.print(cls);
+  Serial.print(" #");
+  Serial.print(trackId);
+  Serial.print(" -> 사람 #");
+  Serial.print(personId);
+  Serial.println(" 머리 근접 -> 진동");
+
+  startVibration(FALL_PATTERN);
+}
+
 // ---------------------------------------------------------------- MQTT 수신
 
 void onMqttMessage(int messageSize) {
@@ -248,6 +276,8 @@ void onMqttMessage(int messageSize) {
     handleDwell(doc);
   } else if (strcmp(event, "fall_warning") == 0) {
     handleFall(doc);
+  } else if (strcmp(event, "box_near_head") == 0) {
+    handleHead(doc);
   } else {
     Serial.print("[mqtt] 알 수 없는 event, 무시: ");
     Serial.println(event);

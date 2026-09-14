@@ -101,12 +101,13 @@
   .vibe-head { display: flex; align-items: center; justify-content: space-between; }
   #mqtt { font-size: 11px; color: var(--label-dim); }
   #mqtt.on { color: var(--det); }
-  #vibe { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+  #vibe { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
   #vibe button { padding: 6px 0; font-size: 12px; box-shadow: inset 0 -2px 0 var(--mark); }
   #vibe [data-side="left"]  { --mark: #5AA9FF; }
   #vibe [data-side="right"] { --mark: #FF9F43; }
   #vibe [data-side="both"]  { --mark: var(--alert); }
   #vibe [data-kind="dwell"] { --mark: var(--zone); }
+  #vibe [data-kind="head"]  { --mark: #B388FF; }
   #vibe-msg { font-size: 11px; color: var(--label-dim); min-height: 15px; word-break: break-all; }
   #vibe-msg.err { color: var(--alert); }
 </style>
@@ -132,12 +133,13 @@
   <div id="events" class="scroll"></div>
   <div class="vibe-head"><h2>진동 테스트</h2><span id="mqtt">MQTT 확인 중</span></div>
   <div id="vibe">
-    <button data-kind="fall" data-side="left" title="왼쪽 보드에 낙하 진동 (짧게 6번)">왼쪽</button>
-    <button data-kind="fall" data-side="both" title="양쪽 보드에 낙하 진동 (짧게 6번)">양쪽</button>
-    <button data-kind="fall" data-side="right" title="오른쪽 보드에 낙하 진동 (짧게 6번)">오른쪽</button>
-    <button data-kind="dwell" data-side="both" title="양쪽 보드에 체류 진동 (길게 3번)">체류</button>
+    <button data-kind="fall" data-side="left" title="왼쪽 보드에 낙하 진동 (짧게 6번)" disabled>왼쪽</button>
+    <button data-kind="fall" data-side="both" title="양쪽 보드에 낙하 진동 (짧게 6번)" disabled>양쪽</button>
+    <button data-kind="fall" data-side="right" title="오른쪽 보드에 낙하 진동 (짧게 6번)" disabled>오른쪽</button>
+    <button data-kind="dwell" data-side="both" title="양쪽 보드에 체류 진동 (길게 3번)" disabled>체류</button>
+    <button data-kind="head" data-side="both" title="양쪽 보드에 머리 근접 경보 (짧게 6번)" disabled>머리</button>
   </div>
-  <div id="vibe-msg">낙하 패턴은 쪽별로, 체류 패턴은 양쪽으로 보냅니다</div>
+  <div id="vibe-msg">낙하는 쪽별로, 체류·머리 근접은 양쪽으로 보냅니다</div>
   <div id="status"></div>
   <a id="nav" href="/analysis">방향 분석 →</a>
 </aside>
@@ -240,11 +242,12 @@ function drawDetections() {
   for (const d of dets) {
     const [x1, y1, x2, y2] = d.box;
     const px = x1 * W, py = y1 * H, pw = (x2 - x1) * W, ph = (y2 - y1) * H;
-    const hot = (d.roi_ids && d.roi_ids.length) || d.falling;
+    const hot = (d.roi_ids && d.roi_ids.length) || d.falling || d.near_head;
     ctx.strokeStyle = hot ? '#FF5A5A' : '#3DDC97';
     ctx.strokeRect(px, py, pw, ph);
 
-    const text = `#${d.id} ${d.name}${d.falling ? ' 낙하' : ''} ${(d.conf * 100).toFixed(0)}%`;
+    const tag = d.falling ? ' 낙하' : d.near_head ? ' 머리' : '';
+    const text = `#${d.id} ${d.name}${tag} ${(d.conf * 100).toFixed(0)}%`;
     const tw = ctx.measureText(text).width + 8;
     ctx.fillStyle = hot ? '#FF5A5A' : '#3DDC97';
     ctx.fillRect(px, Math.max(py - 15, 0), tw, 14);
@@ -360,6 +363,7 @@ function render() {
     for (const [key, text, tip] of [
       ['alert_dwell', '체류', '이 영역에 머무르면 진동'],
       ['alert_fall', '낙하', '이 영역 안의 사람에게 물건이 떨어지면 진동'],
+      ['alert_head', '머리', '이 영역 안의 사람 머리 근처로 박스가 오면 양쪽 진동'],
     ]) {
       const b = document.createElement('button');
       b.className = roi[key] ? 'on' : '';
@@ -528,6 +532,9 @@ async function pollEvents() {
       ? events.map(e => {
           const on = e.alert !== false;
           const cls = on ? '' : ' class="muted"';
+          if (e.event === 'box_near_head')
+            return `<div${cls}>${e.ts} <b>머리 근접</b> #${e.track_id} ${e.name} → 사람 #${e.person_id} `
+              + (on ? '양쪽 진동' : '진동 끔') + (e.roi_name ? ` · ${e.roi_name}` : '') + '</div>';
           if (e.event === 'fall_warning')
             return `<div${cls}>${e.ts} <b>낙하</b> #${e.track_id} ${e.name} → 사람 #${e.person_id} `
               + (on ? `${SIDE_KO[e.side]} 진동` : '진동 끔')
@@ -542,35 +549,49 @@ async function pollEvents() {
 // ---------------------------------------------------------------- 진동 테스트
 // 실제 경보와 같은 형식으로 한 건 보낸다. 보드 배선·VIBE_SIDE·구독 토픽을 확인하는 용도.
 const VIBE_KO = {left: '왼쪽', right: '오른쪽', both: '양쪽'};
+// 브로커에 붙어 있을 때만 버튼을 누를 수 있다. 상태를 모르는 첫 로드는 막아 둔다.
+let mqttReady = false;
+const sending = new Set();          // 보내는 중(연타 방지 600ms 포함)인 버튼
+
+function syncVibeButtons() {
+  document.querySelectorAll('#vibe button').forEach(b => {
+    b.disabled = !mqttReady || sending.has(b);
+  });
+}
 
 document.querySelectorAll('#vibe button').forEach(b => {
   b.onclick = async () => {
     const {kind, side} = b.dataset;
     const $msg = document.getElementById('vibe-msg');
-    b.disabled = true;
+    sending.add(b);
+    syncVibeButtons();
     try {
       const r = await fetch('/api/test-vibe', {method: 'POST',
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify({kind, side})});
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || `HTTP ${r.status}`);
       $msg.className = '';
-      $msg.textContent = `${d.event.ts} ${kind === 'fall' ? VIBE_KO[side] + ' 낙하' : '양쪽 체류'}`
+      const what = {fall: `${VIBE_KO[side]} 낙하`, dwell: '양쪽 체류', head: '양쪽 머리 근접'}[kind];
+      $msg.textContent = `${d.event.ts} ${what}`
                        + ` 진동 보냄 → ${d.topic}`;
     } catch (e) {
       $msg.className = 'err';
       $msg.textContent = `보내지 못함: ${e.message}`;
     } finally {
-      setTimeout(() => { b.disabled = false; }, 600);   // 연타로 같은 진동이 겹치지 않게
+      // 연타로 같은 진동이 겹치지 않게
+      setTimeout(() => { sending.delete(b); syncVibeButtons(); }, 600);
     }
   };
 });
 
 function showMqtt(m) {
   const el = document.getElementById('mqtt');
-  const on = m && m.enabled && m.connected;
+  const on = !!(m && m.enabled && m.connected);
   el.className = on ? 'on' : '';
   el.textContent = !m || !m.enabled ? `MQTT 꺼짐${m && m.reason ? ' — ' + m.reason : ''}`
                  : on ? `● ${m.broker} 연결됨` : `○ ${m.broker} 연결 안 됨`;
+  mqttReady = on;
+  syncVibeButtons();
 }
 
 // 브로커는 앱보다 늦게 뜨거나 중간에 끊길 수 있어 상태를 주기적으로 다시 읽는다.

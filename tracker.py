@@ -12,6 +12,7 @@ Kalman 필터 없이 IoU 매칭만 쓰는 SORT 단순화판이다. 예측 모델
     각각 IndexError와 0 나눗셈을 막기 위한 것으로, 둘 다 실제로 밟기 쉽다.
 """
 import collections
+import math
 
 import numpy as np
 
@@ -70,6 +71,8 @@ class Track:
         self.trail = collections.deque([(now, *box_center(self.box))], maxlen=TRACK_TRAIL)
         self.falling = False       # 지금 떨어지는 중인지 — fall.py 판정을 app.py 가 채운다
         self.fall_fired = False    # 이 트랙으로 낙하 경보를 이미 냈는지
+        self.near_head = False     # 지금 누군가의 머리 주변에서 움직이는 중인지 — head.py
+        self.head_fired = set()    # 이 박스로 머리 근접 경보를 이미 낸 사람 트랙 id
         # ROI 체류 상태 — app.py가 채운다.
         self.roi_since = {}     # roi_id -> 진입 시각
         self.roi_left = {}      # roi_id -> 벗어난 시각 (경계 흔들림 디바운스용)
@@ -106,6 +109,24 @@ class Track:
         t0, _, y0 = self.trail[-2]
         return drop, ((y1 - y0) / (t1 - t0) if t1 > t0 else 0.0)
 
+    def travel(self, window, aspect=1.0):
+        """-> (move, speed). motion() 의 방향 무관판. 화면 높이 단위.
+
+        move  최근 window 초 동안 중심이 움직인 직선거리
+        speed 직전 두 점 사이 속도
+        좌표는 0~1 정규화라 가로 0.01 과 세로 0.01 의 실제 픽셀이 다르다(16:9 면 1.78배).
+        가로에 aspect(가로/세로)를 곱해 세로와 같은 척도로 맞춘다.
+        """
+        t1, x1, y1 = self.trail[-1]
+        old = next(e for e in self.trail if t1 - e[0] <= window)
+        move = math.hypot((x1 - old[1]) * aspect, y1 - old[2])
+        if len(self.trail) < 2:
+            return move, 0.0
+        t0, x0, y0 = self.trail[-2]
+        if t1 <= t0:
+            return move, 0.0
+        return move, math.hypot((x1 - x0) * aspect, y1 - y0) / (t1 - t0)
+
     def to_dict(self, now):
         return {
             "id": self.id,
@@ -117,6 +138,7 @@ class Track:
             "roi_ids": sorted(self.roi_in),
             "facing": self.facing(),
             "falling": self.falling,
+            "near_head": self.near_head,
         }
 
     def facing(self):

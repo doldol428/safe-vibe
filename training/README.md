@@ -56,8 +56,33 @@ python -m venv .venv-train
 | `--epochs` | `50` | 데이터가 적으면 늘리고, 과적합하면 줄인다 |
 | `--batch` | `16` | GPU 메모리 부족하면 낮춘다. `-1` 이면 자동 |
 | `--device` | 자동 | `0` = 첫 GPU, `cpu` = CPU |
+| `--name` | `safe-vibe` | 결과 폴더(`training/runs/<name>`)와 ONNX 파일 이름 |
+| `--degrees` | 0 | 회전 ±도. 기울어진 박스·카메라에 강해진다 (예: `10`) |
+| `--shear` | 0 | 기울임 ±도 (예: `3`) |
+| `--perspective` | 0 | 원근 왜곡 (예: `0.0005`, 0.001 을 넘기면 과하다) |
+| `--mixup` | 0 | 두 사진을 겹칠 확률 (예: `0.1`) |
 
 끝나면 `model/safe-vibe.onnx` 가 생기고 기존 모델은 `.onnx.bak` 으로 남는다.
+
+### 증강 전후 비교
+
+증강 옵션 없이 학습한 결과는 `training/runs/safe-vibe-v8n-noaug/` 에 비교 기준으로 남겨 뒀다.
+데이터·분할·epoch·batch·seed 는 같게 두고 증강만 바꿔야 차이를 증강 탓으로 읽을 수 있다.
+
+```bash
+.venv-train/bin/python training/train.py --data training/dataset/data.yaml --model yolov8n \
+    --degrees 10 --shear 3 --perspective 0.0005
+```
+
+증강 전 모델로 앱을 띄우려면 그 폴더의 ONNX 를 가리킨다 (폴더에 onnx 가 하나뿐이라 그대로 읽힌다).
+
+```bash
+MODEL_DIR=training/runs/safe-vibe-v8n-noaug/weights .venv/bin/python app.py
+```
+
+**기본 증강은 박스를 기울이지 않는다.** ultralytics 기본값은 모자이크·좌우 반전·밝기·이동·크기만
+켜고 회전(`degrees`)·기울임(`shear`)·원근(`perspective`)은 0 이다. 회전을 너무 크게 주면
+돌아간 박스를 감싸는 더 큰 직사각형이 정답이 되어 박스가 헐거워지므로 작게 시작한다.
 
 ```bash
 .venv/bin/python app.py

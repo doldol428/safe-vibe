@@ -44,7 +44,17 @@ def main():
                     help="'0' = 첫 GPU, 'cpu' = CPU. 생략하면 자동 선택")
     ap.add_argument("--name", default="safe-vibe", help="결과 폴더 이름")
     ap.add_argument("--no-export", action="store_true", help="학습만 하고 ONNX 로 내보내지 않는다")
+    # 기하 증강. 주지 않으면 ultralytics 기본값(전부 0 = 끔)이다.
+    # 기본 증강(모자이크·좌우 반전·밝기·이동·크기)은 박스를 기울이지 않는다. 쌓인 박스만
+    # 있는 데이터로 학습하면 기울어진 채 날아오는 박스를 못 알아보는 이유가 이것이다.
+    aug = ap.add_argument_group("증강 (생략하면 ultralytics 기본값)")
+    aug.add_argument("--degrees", type=float, help="회전 ±도. 예: 10")
+    aug.add_argument("--shear", type=float, help="기울임 ±도. 예: 3")
+    aug.add_argument("--perspective", type=float, help="원근 왜곡 비율. 예: 0.0005 (0.001 을 넘기면 과하다)")
+    aug.add_argument("--mixup", type=float, help="두 사진을 겹칠 확률. 예: 0.1")
     args = ap.parse_args()
+    augment = {k: getattr(args, k) for k in ("degrees", "shear", "perspective", "mixup")
+               if getattr(args, k) is not None}
 
     # import 를 함수 안에 둔 이유: --help 만 보려는 사람이 무거운 torch 로딩을
     # 기다리지 않아도 되고, 패키지가 없을 때 설치 안내를 먼저 띄울 수 있다.
@@ -67,7 +77,8 @@ def main():
     print(f"[1/3] 모델 준비: {weights}")
     model = YOLO(weights)
 
-    print(f"[2/3] 학습  epochs={args.epochs} imgsz={args.imgsz} batch={args.batch}")
+    print(f"[2/3] 학습  epochs={args.epochs} imgsz={args.imgsz} batch={args.batch}"
+          f"  증강={augment or '기본값'}")
     model.train(
         data=str(data),
         epochs=args.epochs,
@@ -77,6 +88,7 @@ def main():
         project=str(BASE / "runs"),
         name=args.name,
         exist_ok=True,
+        **augment,
     )
 
     best = Path(model.trainer.best)

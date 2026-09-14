@@ -74,10 +74,25 @@ python -m venv .venv-train
     --degrees 10 --shear 3 --perspective 0.0005
 ```
 
-증강 전 모델로 앱을 띄우려면 그 폴더의 ONNX 를 가리킨다 (폴더에 onnx 가 하나뿐이라 그대로 읽힌다).
+`training/runs/` 는 커밋하지 않으므로, 두 모델의 ONNX 는 `model/trained/` 에 복사해 저장소에 올렸다.
+
+| | 증강 전 (`model/trained/v8n-noaug/`) | 증강 후 (`model/trained/v8n-aug/`) |
+|---|---|---|
+| 검증 mAP50 / 50-95 | 0.956 / 0.815 | 0.946 / 0.767 |
+| box 정밀도 / 재현율 | 0.888 / 0.878 | 0.711 / 0.962 |
+| 던진 박스, conf ≥ 0.35 | 19 샘플 검출, 마지막 2.60초 | 9 샘플, 마지막 3.05초 |
+| 던진 박스, 충돌 직전(2.65~3.10초) | 0/10 | 1/10 (3.05초, 0.46) |
+| 떨어진 박스 낙하 경보 | 오른쪽 | 오른쪽 |
+| 낙하 없는 영상 3편 오경보 | 0 | 0 |
+
+(던진/떨어진 박스 영상을 초당 20번 분석한 값. 샘플 = 분석한 프레임 수)
+
+증강 후 모델은 기울어진 박스를 충돌 순간에 한 번 더 잡지만, 날아오는 중간 구간은 오히려 덜 잡고
+박스가 아닌 것을 박스로 잡는 일이 늘었다. 검증 세트에는 기울어진 박스가 없어서 증강의 이득이
+점수로 드러나지 않는다. 앱에서 고르려면:
 
 ```bash
-MODEL_DIR=training/runs/safe-vibe-v8n-noaug/weights .venv/bin/python app.py
+MODEL_DIR=model/trained/v8n-noaug .venv/bin/python app.py
 ```
 
 **기본 증강은 박스를 기울이지 않는다.** ultralytics 기본값은 모자이크·좌우 반전·밝기·이동·크기만

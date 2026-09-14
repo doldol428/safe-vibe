@@ -7,6 +7,15 @@
 - 변환: `imgsz=640`, `opset=12`, `dynamic=False` 로 ONNX export
 - 클래스: COCO 80종 (`names` 메타데이터에 들어 있고 `detector.py` 가 이를 읽는다)
 
+## 방향 분석용 pose 모델
+
+`model/pose/yolov8n-pose.onnx` 는 저장소에 들어 있지 않다. README 의 '방향 분석' 절차로 만든다.
+
+- 원본: [Ultralytics YOLOv8n-pose](https://github.com/ultralytics/assets) (`yolov8n-pose.pt`)
+- 변환: 위와 같은 조건 (`imgsz=640`, `opset=12`, `dynamic=False`)
+- 출력: 사람 1클래스 + COCO 관절점 17개 (`kpt_shape=[17, 3]`)
+- 라이선스: 아래와 같이 **AGPL-3.0**
+
 ## 라이선스
 
 저장소 루트의 MIT 라이선스는 **이 프로젝트의 소스 코드에만** 적용된다.

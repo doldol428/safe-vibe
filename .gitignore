@@ -16,6 +16,8 @@ roi.json.*.tmp
 model/*.onnx
 model/*.pt
 !model/yolov8n.onnx
+# 방향 분석용 pose 모델 — README 의 '방향 분석' 절차로 만든다
+model/pose/
 
 # 학습(training/) 이 만드는 것들 — 전부 재생성 가능하고 용량이 크다.
 # 데이터셋 원본과 변환 결과, 학습 로그/가중치, 학습 전용 venv 는 커밋하지 않는다.

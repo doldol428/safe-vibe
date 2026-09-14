@@ -26,11 +26,12 @@ def _list(name, default):
 
 
 # ---------------------------------------------------------------- 경로
-VIDEO_DIR = _path("VIDEO_DIR", BASE_DIR / "video")   # 여기 mp4 하나만 둔다
+VIDEO_DIR = _path("VIDEO_DIR", BASE_DIR / "video")   # 여러 개면 이름순 첫 번째 mp4
 MODEL_DIR = _path("MODEL_DIR", BASE_DIR / "model")   # 여기 onnx 하나만 둔다
 ROI_FILE = _path("ROI_FILE", BASE_DIR / "roi.json")
 INDEX_FILE = BASE_DIR / "index.html"
-# 영상 파일을 직접 지정하면 VIDEO_DIR의 단일 파일 규칙을 건너뛴다.
+ANALYSIS_FILE = BASE_DIR / "analysis.html"
+# 영상 파일을 직접 지정하면 VIDEO_DIR 에서 고르지 않고 그 파일을 쓴다.
 VIDEO = os.environ.get("VIDEO")
 
 # ---------------------------------------------------------------- 서버
@@ -53,6 +54,24 @@ CONF_THRESHOLD = _float("CONF_THRESHOLD", 0.35)
 NMS_IOU = _float("IOU_THRESHOLD", 0.5)   # 검출 후처리 NMS (트래커 IoU와 다름)
 ORT_THREADS = _int("ORT_THREADS", 0)     # 0이면 onnxruntime 기본값
 
+# ---------------------------------------------------------------- 자세 / 방향 분석
+# 박스만으로는 사람이 어느 쪽을 보는지 알 수 없어 YOLOv8-pose 를 검출 모델과 같이 돌린다.
+# model/ 의 "onnx 하나" 규칙과 섞이지 않게 하위 디렉터리에 둔다. 파일이 없으면 분석만 꺼진다.
+# 사람 트랙이 있는 프레임에서만 돌므로 사람이 없을 때는 CPU 를 더 쓰지 않는다.
+POSE_MODEL = _path("POSE_MODEL", BASE_DIR / "model" / "pose" / "yolov8n-pose.onnx")
+POSE_CLASS = os.environ.get("POSE_CLASS", "person")   # 검출 모델에서 pose 를 붙일 클래스
+POSE_CONF = _float("POSE_CONF", 0.35)
+POSE_MATCH_IOU = _float("POSE_MATCH_IOU", 0.3)   # pose 사람 박스 <-> 트랙 매칭 임계값
+KP_CONF = _float("KP_CONF", 0.5)                 # 이 신뢰도 이상인 관절점만 방향 판정에 쓴다
+# 어깨 x 간격이 박스 폭의 이 비율 이상이면 정면/뒷모습, 미만이면 옆모습.
+# 0.25 로는 완전한 옆모습이 뒷모습으로 잡혀서 0.3 으로 둔다.
+FACING_SIDE_RATIO = _float("FACING_SIDE_RATIO", 0.3)
+# 코가 어깨 중심에서 박스 폭의 이 비율 이상 벗어나면 고개가 그쪽을 향한 것으로 본다.
+FACING_HEAD_RATIO = _float("FACING_HEAD_RATIO", 0.08)
+# 트랙별 최근 N번 판정의 다수결을 방향으로 쓴다. 한 프레임짜리 오판을 걸러낸다.
+FACING_WINDOW = _int("FACING_WINDOW", 5)
+FACING_HISTORY = _int("FACING_HISTORY", 40)      # 분석 페이지에 보여줄 트랙별 판정 이력 수
+
 # ---------------------------------------------------------------- 트래커
 # max_age는 "프레임" 단위라 AI_FPS에 따라 실제 시간이 달라진다.
 # AI 4fps 기준 12프레임 = 약 3초. 검출이 끊겨도 이만큼은 트랙을 유지한다.
@@ -61,6 +80,7 @@ ORT_THREADS = _int("ORT_THREADS", 0)     # 0이면 onnxruntime 기본값
 TRACK_MAX_AGE = _int("TRACK_MAX_AGE", 12)
 TRACK_MIN_HITS = _int("TRACK_MIN_HITS", 2)   # 오검출 억제
 TRACK_IOU = _float("TRACK_IOU", 0.3)         # 검출-트랙 매칭 임계값
+TRACK_TRAIL = _int("TRACK_TRAIL", 12)        # 트랙별로 기억할 중심점 이력 수 (낙하 판정용)
 
 # ---------------------------------------------------------------- 이벤트
 EVENT_CLASSES = _list("EVENT_CLASSES", "person")
@@ -79,6 +99,25 @@ DWELL_SEC = _float("DWELL_SEC", 2)
 # 이만큼 계속 벗어나 있어야 "나갔다"로 인정한다.
 EXIT_SEC = _float("EXIT_SEC", 2)
 EVENT_LOG_SIZE = _int("EVENT_LOG_SIZE", 50)  # 메모리에 보관할 최근 이벤트 수
+
+# ---------------------------------------------------------------- 낙하 경보
+# FALL_CLASS 트랙의 중심이 짧은 시간에 아래로 크게 움직이면 떨어지는 것으로 보고,
+# 가까운 사람의 왼쪽/오른쪽 진동 클라이언트로 경보를 보낸다 (fall.py).
+# 거리/속도는 전부 화면 크기 기준 0~1 이다.
+FALL_CLASS = os.environ.get("FALL_CLASS", "box")
+FALL_WINDOW_SEC = _float("FALL_WINDOW_SEC", 1.0)    # 이 시간 동안의 움직임으로 판정
+# 쌓여 있는 박스도 검출이 흔들려 중심이 0.01 정도 오르내린다. 그보다 확실히 크게 잡는다.
+FALL_MIN_DROP = _float("FALL_MIN_DROP", 0.03)       # 누적 하강량 (화면 높이 비율)
+FALL_MIN_SPEED = _float("FALL_MIN_SPEED", 0.1)      # 직전 구간 하강 속도 (화면 높이/초)
+# 사람 몸 중심에서 사람 박스 폭의 이 배수 안쪽으로 떨어지면 그 사람에게 경보를 낸다.
+FALL_NEAR_RATIO = _float("FALL_NEAR_RATIO", 1.5)
+# 이 안쪽이면 머리 바로 위로 떨어지는 것이라 좌/우를 가르지 않고 양쪽으로 보낸다.
+FALL_CENTER_RATIO = _float("FALL_CENTER_RATIO", 0.25)
+# 최근 어깨 간격 평균(박스 폭 대비)이 이보다 좁으면 옆모습이라 몸의 좌/우를 알 수 없어 양쪽.
+# 방향 표시(FACING_SIDE_RATIO=0.3)보다 낮게 둔다 — 비스듬한 뒷모습(-0.3~-0.45)은 좌우가 분명하다.
+FALL_PROFILE_RATIO = _float("FALL_PROFILE_RATIO", 0.15)
+# 떨어지는 동안 박스 검출이 끊겨 새 트랙으로 다시 잡혀도, 같은 사람에게는 이만큼 한 번만 울린다.
+FALL_COOLDOWN_SEC = _float("FALL_COOLDOWN_SEC", 3)
 
 # ---------------------------------------------------------------- MQTT
 # 이벤트를 외부로 내보낸다. 기본값은 같은 장비의 브로커(mosquitto)다.

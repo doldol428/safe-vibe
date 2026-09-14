@@ -20,8 +20,9 @@ class NoModelError(RuntimeError):
 
 class Detector:
     def __init__(self, model_dir=MODEL_DIR,
-                 conf=CONF_THRESHOLD, iou=NMS_IOU):
-        self.path = self._find_model(Path(model_dir))
+                 conf=CONF_THRESHOLD, iou=NMS_IOU, path=None):
+        # path 를 주면 디렉터리 규칙을 건너뛴다 (pose.py 가 model/pose/ 의 모델을 열 때).
+        self.path = Path(path) if path else self._find_model(Path(model_dir))
         self.conf, self.iou = conf, iou
 
         opts = ort.SessionOptions()
@@ -84,6 +85,21 @@ class Detector:
         canvas[dy:dy + nh, dx:dx + nw] = resized
         return canvas, scale, dx, dy
 
+    def _forward(self, frame):
+        """letterbox -> 추론. 출력과, 좌표를 원본으로 되돌릴 때 쓸 값(geo)을 돌려준다."""
+        h0, w0 = frame.shape[:2]
+        canvas, scale, dx, dy = self._letterbox(frame)
+        blob = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
+        blob = (blob.astype(np.float32) / 255.0).transpose(2, 0, 1)[None]
+        out = self.sess.run(None, {self.input_name: blob})[0]
+        return out, (scale, dx, dy, w0, h0)
+
+    @staticmethod
+    def _unletterbox(x, y, geo):
+        """모델 입력 픽셀 -> letterbox 되돌리기 -> 원본 프레임 기준 0~1 정규화."""
+        scale, dx, dy, w0, h0 = geo
+        return (x - dx) / scale / w0, (y - dy) / scale / h0
+
     # ------------------------------------------------------------ 추론
 
     def infer(self, frame):
@@ -92,12 +108,7 @@ class Detector:
         박스는 원본 프레임 기준 0~1 정규화 좌표(x1,y1,x2,y2)로 돌려준다.
         ROI 좌표계와 같은 단위라 그대로 대조할 수 있다.
         """
-        h0, w0 = frame.shape[:2]
-        canvas, scale, dx, dy = self._letterbox(frame)
-        blob = cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB)
-        blob = (blob.astype(np.float32) / 255.0).transpose(2, 0, 1)[None]
-
-        out = self.sess.run(None, {self.input_name: blob})[0]
+        out, geo = self._forward(frame)
         pred = self._as_rows(out)                  # (N, 4+num_classes)
         if pred is None or not len(pred):
             return []
@@ -122,11 +133,8 @@ class Detector:
         results = []
         for i in idx:
             x, y, w, h = xywh[i]
-            # letterbox 되돌리기 -> 원본 픽셀 -> 정규화
-            x1 = (x - dx) / scale / w0
-            y1 = (y - dy) / scale / h0
-            x2 = (x + w - dx) / scale / w0
-            y2 = (y + h - dy) / scale / h0
+            x1, y1 = self._unletterbox(x, y, geo)
+            x2, y2 = self._unletterbox(x + w, y + h, geo)
             results.append({
                 "cls": int(cls[i]),
                 "name": self.name_of(int(cls[i])),

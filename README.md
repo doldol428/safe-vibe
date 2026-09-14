@@ -36,13 +36,17 @@ venv 생성 → 패키지 설치 → 샘플 영상 정리 → yolov8n ONNX 준�
 | `app.py`            | HTTP 서버, 추론 워커, ROI 체류 판정과 이벤트 발행                               |
 | `frames.py`         | 프레임 소스(Picamera2/ffmpeg)와 공유 파이프라인, MJPEG fan-out                  |
 | `detector.py`       | `model/` 의 단일 ONNX를 onnxruntime으로 서빙 (클래스명은 메타데이터에서 읽음) |
+| `pose.py`           | YOLOv8-pose 로 사람 관절점을 뽑아 몸/고개 방향을 판정 (선택)                    |
+| `fall.py`           | 떨어지는 박스를 잡아 사람의 왼쪽/오른쪽 중 어느 쪽인지 판정                      |
 | `tracker.py`        | IoU 기반 트래커 — 같은 사람에게 ID를 유지해 중복 경보를 막는다                 |
 | `roistore.py`       | ROI CRUD,`roi.json` 저장 (좌표는 0~1 정규화)                                  |
 | `mqttpub.py`        | 이벤트 MQTT 발행 (브로커가 없어도 앱은 그대로 동작)                             |
-| `index.html`        | 단일 파일 웹 UI                                                                 |
+| `index.html`        | ROI 설정 웹 UI (`/`)                                                          |
+| `analysis.html`     | 방향 분석 웹 UI (`/analysis`) — 뼈대, 방향 판정 근거, 방향 이력                |
 | `safe-vibe-client/` | 경보를 받아 진동으로 알리는 Arduino UNO R4 WiFi 클라이언트                      |
 
-`video/` 에 mp4 하나, `model/` 에 onnx 하나 — 디렉터리마다 파일 하나가 규칙이다.
+`model/` 에는 onnx 하나만 둔다(pose 모델은 예외로 `model/pose/` 에 따로 둔다).
+`video/` 에 mp4 가 여러 개면 이름순 첫 번째를 쓰고, 다른 영상은 `VIDEO=video/파일.mp4` 로 고른다.
 
 ## 설정
 
@@ -72,6 +76,86 @@ STREAM_W=640 AI_FPS=2 CONF_THRESHOLD=0.45 python app.py
 | `GET /api/events`                                   | 최근 체류 이벤트                 |
 | `GET /api/status`                                   | 소스·모델·트래커 설정 요약     |
 | `GET/POST /api/rois`, `PUT/DELETE /api/rois/{id}` | ROI 관리                         |
+| `GET /analysis`                                     | 방향 분석 페이지                 |
+| `GET /api/analysis`                                 | 사람 트랙별 관절점, 방향 판정 근거, 방향 이력 |
+
+## 방향 분석
+
+박스만으로는 사람이 **어느 쪽을 보는지** 알 수 없다. 그래서 검출 모델과 별도로
+YOLOv8n-pose 를 같이 돌려 관절점(코·눈·귀·어깨)으로 방향을 정한다.
+`model/pose/yolov8n-pose.onnx` 가 없으면 이 기능만 꺼지고 나머지는 그대로 돈다.
+
+모델은 저장소에 없으므로 한 번 만든다 (학습용 venv 재사용, `training/README.md` 참고).
+
+```bash
+.venv-train/bin/python -c "from ultralytics import YOLO; YOLO('yolov8n-pose.pt').export(format='onnx', imgsz=640, opset=12, dynamic=False, simplify=True)"
+mkdir -p model/pose && mv yolov8n-pose.onnx model/pose/
+```
+
+앱을 다시 띄우고 http://localhost:8080/analysis 를 연다.
+
+**판정 방식** (`pose.facing()`). 방향은 전부 **화면 기준**이다.
+
+| 요소 | 근거 | 결과 |
+|---|---|---|
+| 몸 | 두 어깨의 좌우 순서와 간격 (박스 폭 대비 `FACING_SIDE_RATIO`) | 정면이면 사람의 왼어깨가 화면 오른쪽에 온다 → `front`, 그대로면 `back`, 간격이 좁으면 `side` |
+| 고개 | 코가 어깨 중심에서 벗어난 정도 (`FACING_HEAD_RATIO`) | `left` / `right` / `center` |
+
+둘을 합쳐 `back-right`, `right`(옆모습+오른쪽) 같은 label 을 만들고, 트랙마다 최근
+`FACING_WINDOW` 번의 다수결을 최종 방향으로 쓴다. 한 프레임짜리 오판을 걸러내기 위해서다.
+
+알아둘 것:
+
+- **CPU 를 더 쓴다.** 사람 트랙이 있는 프레임에서만 pose 를 돌리지만, 그때는 모델이
+  두 번 돈다. 분석 페이지와 `/api/detections` 의 `pose_ms` 로 확인한다.
+- **뒤돌아 있거나 가려지면 좌우가 뒤집히기 쉽다.** 분석 페이지의 뼈대는 사람의 왼쪽을
+  파랑, 오른쪽을 주황으로 그린다. 정면인데 파랑이 화면 왼쪽에 있으면 뒤집어 읽은 것이다.
+  뒷모습인데 두 눈과 코가 보이는 경우는 카드에 경고로 표시한다.
+- 지금 기준값은 뒷모습/오른쪽을 보는 영상으로만 확인했다. 정면·왼쪽 장면에서 틀리면
+  `FACING_SIDE_RATIO` / `FACING_HEAD_RATIO` / `KP_CONF` 부터 조정한다.
+
+## 낙하 경보 (좌/우 진동)
+
+`box` 트랙이 아래로 빠르게 움직이면 떨어지는 것으로 보고, 가장 가까운 사람의
+**왼쪽/오른쪽** 진동 클라이언트로 경보를 보낸다 (`fall.py`). 기준 영상은
+`video/converted/falling_box_slow.mp4` (선반 위 박스가 사람 오른쪽 머리 위로 떨어진다).
+
+```bash
+VIDEO=video/converted/falling_box_slow.mp4 .venv/bin/python app.py
+```
+
+| 단계 | 기준 |
+|---|---|
+| 떨어지는 중 | 최근 `FALL_WINDOW_SEC` 동안 중심이 `FALL_MIN_DROP` 이상 내려갔고, 직전 구간 하강 속도가 `FALL_MIN_SPEED` 이상 |
+| 누구에게 | 박스가 사람 발밑보다 위에 있고, 몸 중심(어깨 중점)에서 사람 폭의 `FALL_NEAR_RATIO` 배 안쪽 |
+| 화면 좌/우 | 몸 중심 대비 박스 위치. `FALL_CENTER_RATIO` 안쪽이면 머리 바로 위라 양쪽 |
+| 몸 좌/우 | 최근 어깨 간격(`sh_dx`) 평균으로 바꾼다. 등이 보이면(-) 그대로, 얼굴이 보이면(+) 반대, `±FALL_PROFILE_RATIO` 안쪽 옆모습은 양쪽, 어깨를 못 보면 화면 기준 |
+
+화면 표시용 방향(`back-right`, `right` …)은 비스듬한 뒷모습에서 두 값 사이를 오간다.
+좌/우 판정이 그 경계에 휘둘리지 않도록 어깨 간격 값의 평균을 따로 쓰고, 옆모습으로
+보는 기준(`0.15`)도 방향 표시 기준(`0.3`)보다 좁게 잡았다.
+
+발행 토픽은 몸 기준 쪽으로 나뉜다. 두 클라이언트는 **같은 펌웨어**를 쓰고
+`VIBE_SIDE` 설정만 다르다 (`safe-vibe-client/README.md`).
+
+| 토픽 | 받는 보드 | 내용 |
+|---|---|---|
+| `safe-vibe/alert` | 전부 | ROI 체류, 양쪽 낙하 |
+| `safe-vibe/alert/left` | `VIBE_SIDE "left"` | 왼쪽 낙하 |
+| `safe-vibe/alert/right` | `VIBE_SIDE "right"` | 오른쪽 낙하 |
+
+```json
+{"event":"fall_warning","ts":"00:52:10","ts_epoch":1789314730.1,"track_id":41,"name":"box",
+ "person_id":3,"side":"right","screen_side":"right","basis":"back","facing":"back-right",
+ "offset":0.74,"drop":0.07,"speed":0.16}
+```
+
+알아둘 것:
+
+- **AI_FPS 가 곧 반응 속도다.** 기준 영상은 슬로모션이라 4fps 로도 잡히지만, 실제 속도의
+  낙하는 1초도 안 걸린다. 검출과 pose 가 같이 돌면 이 PC 에서 한 주기에 100ms 남짓이다.
+- 떨어지는 동안 사람 머리와 겹치면 박스 검출이 끊긴다. 그래서 겹치기 전, 떨어지기 시작한
+  직후의 움직임으로 판정한다.
 
 ## 라즈베리파이
 
@@ -125,10 +209,12 @@ python setup.py
 ```
 config.py ← 모든 모듈이 참조 (설정은 여기 한 곳에만)
     ↑
-frames.py   detector.py   tracker.py   roistore.py   mqttpub.py
-    └───────────┴─────────────┴────────────┴─────────────┘
-                          app.py  (조립 + HTTP)
+frames.py   detector.py ← pose.py   tracker.py   roistore.py   mqttpub.py
+    └───────────┴────────────┴──────────┴────────────┴─────────────┘
+                              app.py  (조립 + HTTP)
 ```
+
+`pose.py` 는 예외로 `detector.py`(전처리 재사용)와 `tracker.py`(IoU 매칭 재사용)를 안다.
 
 `app.py` 만 다른 모듈을 알고, 나머지는 서로를 모른다. 새 기능은 대개 해당
 모듈에 넣고 `app.py` 에서 연결하는 형태가 된다.
@@ -145,6 +231,8 @@ DetectionWorker._loop (추론 스레드, AI_FPS 주기)
   pipeline.latest() → seq 가 바뀌었을 때만 추론
     → detector.infer()   letterbox → ONNX → NMS → 0~1 정규화 박스
     → tracker.update()   IoU greedy 매칭 → 트랙 ID 부여
+    → _pose()            사람 트랙이 있을 때만 pose 추론 → 트랙에 관절점/방향 (선택)
+    → _match_falls()     box 트랙 하강 속도 → 가까운 사람의 몸 기준 좌/우 → 낙하 경보
     → _match_rois()      ROI 겹침 → 체류 시간 누적 → 이벤트
     → mqttpub.publish()
 ```
@@ -156,7 +244,7 @@ DetectionWorker._loop (추론 스레드, AI_FPS 주기)
 | 락                       | 보호 대상                                  |
 | ------------------------ | ------------------------------------------ |
 | `Pipeline._lock`       | 최신 raw 프레임과 seq                      |
-| `DetectionWorker.lock` | `detections` / `roi_hits` / `events` |
+| `DetectionWorker.lock` | `detections` / `people` / `roi_hits` / `events` |
 | `roistore._lock`       | `roi.json` 읽기·쓰기                    |
 
 규칙 하나: **락을 쥔 채로 느려질 수 있는 일을 하지 않는다.** MQTT 발행과 로그

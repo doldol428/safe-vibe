@@ -3,9 +3,19 @@
  *
  *   safe-vibe (app.py) --MQTT--> mosquitto --> 이 보드 --> 진동 모터(D7)
  *
- * 구독 토픽 : safe-vibe/alert   (QoS 1)
- * 페이로드   : {"ts":"14:03:22","roi_id":1,"roi_name":"입구","track_id":7,
- *               "name":"person","dwell":2.1,"event":"roi_dwell","ts_epoch":1788504449.5}
+ * 구독 토픽 (QoS 1)
+ *   safe-vibe/alert           공통 — ROI 체류, 머리 위/옆모습이라 양쪽인 낙하 경보
+ *   safe-vibe/alert/<SIDE>    이 보드 쪽 낙하 경보 (VIBE_SIDE 가 "left"/"right" 일 때만)
+ *
+ * 페이로드
+ *   roi_dwell     {"event":"roi_dwell","ts":"14:03:22","roi_id":1,"roi_name":"입구",
+ *                  "track_id":7,"name":"person","dwell":2.1,"ts_epoch":1788504449.5}
+ *   fall_warning  {"event":"fall_warning","track_id":41,"name":"box","person_id":3,
+ *                  "side":"right","screen_side":"right","basis":"back",...}
+ *
+ * 몸의 왼쪽/오른쪽에 한 대씩 달 때도 스케치는 하나다. 두 보드에 그대로 올리고
+ * arduino_secrets.h 의 VIBE_SIDE 만 "left" / "right" 로 다르게 준다.
+ * 어느 쪽 경보인지는 서버가 토픽으로 나눠 보내므로 보드는 자기 토픽만 구독하면 된다.
  *
  * 필요한 라이브러리 (라이브러리 매니저에서 설치):
  *   - ArduinoMqttClient   (Arduino 공식)
@@ -23,10 +33,16 @@
 #include <ArduinoMqttClient.h>
 #include <ArduinoJson.h>
 
-// WiFi 자격증명은 저장소에 올리지 않는다.
+// WiFi 자격증명과 보드별 설정(VIBE_SIDE)은 저장소에 올리지 않는다.
 // arduino_secrets.h.example 을 복사해 arduino_secrets.h 를 만들고 값을 채울 것.
 // (.gitignore 에 arduino_secrets.h 가 들어 있다)
 #include "arduino_secrets.h"
+
+// 예전에 만든 arduino_secrets.h 에는 VIBE_SIDE 가 없다. 그래도 컴파일되도록,
+// 없으면 좌우 구분 없이 공통 경보만 받는 예전 동작으로 둔다.
+#ifndef VIBE_SIDE
+#define VIBE_SIDE "both"
+#endif
 
 // ---------------------------------------------------------------- 설정
 
@@ -43,16 +59,21 @@ const char MQTT_CLIENT_ID[]= "";
 const char MQTT_USER[]     = "";                 // 인증을 걸면 채운다
 const char MQTT_PASSWORD[] = "";
 
+const char BOARD_SIDE[]    = VIBE_SIDE;          // "left" | "right" | "both"
+
 const int  MOTOR_PIN       = 7;
 
-// 진동 패턴: PULSE_COUNT 번, ON/OFF 를 반복한다. delay() 를 쓰지 않는다.
-const int          PULSE_COUNT  = 3;
-const unsigned long PULSE_ON_MS  = 300;
-const unsigned long PULSE_OFF_MS = 150;
+// 진동 패턴: count 번 ON/OFF 를 반복한다. delay() 를 쓰지 않는다.
+// 경보 종류를 몸으로 구분할 수 있게 다르게 둔다 — 체류는 길게 3번, 낙하는 짧고 급하게 6번.
+struct Pattern { int count; unsigned long onMs; unsigned long offMs; };
+const Pattern DWELL_PATTERN = { 3, 300, 150 };
+const Pattern FALL_PATTERN  = { 6, 120, 60 };
 
 // QoS 1 은 "적어도 한 번"이라 같은 이벤트가 두 번 올 수 있다. 서버도 track_id 로
 // 걸러내라고 안내한다. 같은 (track_id, roi_id) 가 이 시간 안에 또 오면 무시한다.
 const unsigned long DEDUP_MS = 3000;
+// 낙하 경보에는 roi_id 가 없다. ROI id 는 1부터라 겹치지 않는 값을 키로 쓴다.
+const long FALL_DEDUP_KEY = -2;
 
 const unsigned long RECONNECT_MS = 3000;   // MQTT 재접속 간격
 
@@ -63,6 +84,7 @@ MqttClient  mqtt(net);
 
 // 진동 상태 머신 — loop() 를 막지 않기 위한 것. 모터가 도는 동안에도
 // mqtt.poll() 이 계속 돌아야 keepalive 가 유지되고 다음 이벤트를 놓치지 않는다.
+Pattern       current      = DWELL_PATTERN;
 int           pulsesLeft   = 0;
 bool          motorOn      = false;
 unsigned long phaseStarted = 0;
@@ -73,6 +95,9 @@ unsigned long lastReconnectAttempt = 0;
 // "safe-vibe-" + MAC 12자 = 22자라 안전하게 들어간다.
 char clientId[24];
 
+// 이 보드 쪽 낙하 토픽 ("safe-vibe/alert/left"). VIBE_SIDE 가 both 면 빈 문자열.
+char sideTopic[64] = "";
+
 // 최근 이벤트 기억용 (중복 제거)
 const int DEDUP_SLOTS = 8;
 struct Seen { long trackId; long roiId; unsigned long at; };
@@ -81,11 +106,15 @@ int  seenNext = 0;
 
 // ---------------------------------------------------------------- 진동
 
-void startVibration() {
-  pulsesLeft   = PULSE_COUNT;
+// 진동 중에 새 경보가 오면 새 패턴으로 처음부터 다시 울린다. 낙하가 체류보다
+// 급한 경보라, 체류 진동이 끝나길 기다리게 두면 안 된다.
+void startVibration(const Pattern& p) {
+  current      = p;
+  pulsesLeft   = p.count;
   motorOn      = true;
   phaseStarted = millis();
   digitalWrite(MOTOR_PIN, HIGH);
+  digitalWrite(LED_BUILTIN, HIGH);
 }
 
 void serviceVibration() {
@@ -93,7 +122,7 @@ void serviceVibration() {
 
   unsigned long elapsed = millis() - phaseStarted;
 
-  if (motorOn && elapsed >= PULSE_ON_MS) {
+  if (motorOn && elapsed >= current.onMs) {
     digitalWrite(MOTOR_PIN, LOW);
     motorOn      = false;
     phaseStarted = millis();
@@ -101,7 +130,7 @@ void serviceVibration() {
     if (pulsesLeft <= 0) {
       digitalWrite(LED_BUILTIN, LOW);
     }
-  } else if (!motorOn && elapsed >= PULSE_OFF_MS && pulsesLeft > 0) {
+  } else if (!motorOn && elapsed >= current.offMs && pulsesLeft > 0) {
     digitalWrite(MOTOR_PIN, HIGH);
     motorOn      = true;
     phaseStarted = millis();
@@ -122,6 +151,73 @@ bool isDuplicate(long trackId, long roiId) {
   seen[seenNext] = { trackId, roiId, now };
   seenNext = (seenNext + 1) % DEDUP_SLOTS;
   return false;
+}
+
+// ---------------------------------------------------------------- 이벤트 처리
+
+void handleDwell(JsonDocument& doc) {
+  long        trackId = doc["track_id"] | -1L;
+  long        roiId   = doc["roi_id"]   | -1L;
+  const char* roiName = doc["roi_name"] | "?";
+  const char* cls     = doc["name"]     | "?";
+  float       dwell   = doc["dwell"]    | 0.0f;
+
+  if (isDuplicate(trackId, roiId)) {
+    Serial.print("[event] 중복 무시 — #");
+    Serial.println(trackId);
+    return;
+  }
+
+  Serial.print("[event] ");
+  Serial.print(roiName);
+  Serial.print(" — #");
+  Serial.print(trackId);
+  Serial.print(' ');
+  Serial.print(cls);
+  Serial.print(' ');
+  Serial.print(dwell, 1);
+  Serial.println("초 체류 -> 진동");
+
+  startVibration(DWELL_PATTERN);
+}
+
+void handleFall(JsonDocument& doc) {
+  const char* side     = doc["side"]        | "both";
+  const char* screen   = doc["screen_side"] | "?";
+  const char* basis    = doc["basis"]       | "?";
+  const char* cls      = doc["name"]        | "?";
+  long        trackId  = doc["track_id"]    | -1L;
+  long        personId = doc["person_id"]   | -1L;
+
+  // 서버가 토픽으로 이미 나눠 보내지만, 공통 토픽에 한쪽 경보가 실려 오더라도
+  // 반대쪽 보드가 울리지 않게 한 번 더 확인한다.
+  if (strcmp(side, "both") != 0 && strcmp(side, BOARD_SIDE) != 0) {
+    Serial.print("[fall] 다른 쪽 경보, 무시: ");
+    Serial.println(side);
+    return;
+  }
+
+  if (isDuplicate(trackId, FALL_DEDUP_KEY)) {
+    Serial.print("[fall] 중복 무시 — #");
+    Serial.println(trackId);
+    return;
+  }
+
+  Serial.print("[fall] ");
+  Serial.print(cls);
+  Serial.print(" #");
+  Serial.print(trackId);
+  Serial.print(" -> 사람 #");
+  Serial.print(personId);
+  Serial.print(' ');
+  Serial.print(side);
+  Serial.print(" (화면 ");
+  Serial.print(screen);
+  Serial.print(", ");
+  Serial.print(basis);
+  Serial.println(") -> 진동");
+
+  startVibration(FALL_PATTERN);
 }
 
 // ---------------------------------------------------------------- MQTT 수신
@@ -148,36 +244,14 @@ void onMqttMessage(int messageSize) {
   }
 
   const char* event = doc["event"] | "";
-  if (strcmp(event, "roi_dwell") != 0) {
+  if (strcmp(event, "roi_dwell") == 0) {
+    handleDwell(doc);
+  } else if (strcmp(event, "fall_warning") == 0) {
+    handleFall(doc);
+  } else {
     Serial.print("[mqtt] 알 수 없는 event, 무시: ");
     Serial.println(event);
-    return;
   }
-
-  long        trackId = doc["track_id"] | -1L;
-  long        roiId   = doc["roi_id"]   | -1L;
-  const char* roiName = doc["roi_name"] | "?";
-  const char* cls     = doc["name"]     | "?";
-  float       dwell   = doc["dwell"]    | 0.0f;
-
-  if (isDuplicate(trackId, roiId)) {
-    Serial.print("[event] 중복 무시 — #");
-    Serial.println(trackId);
-    return;
-  }
-
-  Serial.print("[event] ");
-  Serial.print(roiName);
-  Serial.print(" — #");
-  Serial.print(trackId);
-  Serial.print(' ');
-  Serial.print(cls);
-  Serial.print(' ');
-  Serial.print(dwell, 1);
-  Serial.println("초 체류 -> 진동");
-
-  digitalWrite(LED_BUILTIN, HIGH);
-  startVibration();
 }
 
 // ---------------------------------------------------------------- 연결
@@ -195,6 +269,16 @@ void buildClientId() {
   WiFi.macAddress(mac);
   snprintf(clientId, sizeof(clientId), "safe-vibe-%02X%02X%02X%02X%02X%02X",
            mac[5], mac[4], mac[3], mac[2], mac[1], mac[0]);
+}
+
+void buildSideTopic() {
+  if (strcmp(BOARD_SIDE, "left") == 0 || strcmp(BOARD_SIDE, "right") == 0) {
+    snprintf(sideTopic, sizeof(sideTopic), "%s/%s", MQTT_TOPIC, BOARD_SIDE);
+  } else if (strcmp(BOARD_SIDE, "both") != 0) {
+    // 오타("Left", "rigth")면 조용히 한쪽 경보를 못 받게 된다. 눈에 띄게 알린다.
+    Serial.print("[board] VIBE_SIDE 값이 잘못됐습니다 (left/right/both): ");
+    Serial.println(BOARD_SIDE);
+  }
 }
 
 void ensureWiFi() {
@@ -246,10 +330,17 @@ bool connectMqtt() {
     return false;
   }
 
+  // 재접속하면 구독이 사라지므로(clean session) 접속할 때마다 다시 구독한다.
   mqtt.onMessage(onMqttMessage);
   mqtt.subscribe(MQTT_TOPIC, 1);      // QoS 1
   Serial.print("[mqtt] 연결됨 — 구독: ");
-  Serial.println(MQTT_TOPIC);
+  Serial.print(MQTT_TOPIC);
+  if (sideTopic[0]) {
+    mqtt.subscribe(sideTopic, 1);
+    Serial.print(", ");
+    Serial.print(sideTopic);
+  }
+  Serial.println();
   return true;
 }
 
@@ -274,8 +365,11 @@ void setup() {
   }
 
   buildClientId();
+  buildSideTopic();
   Serial.print("[mqtt] client id : ");
   Serial.println(clientId);
+  Serial.print("[board] side     : ");
+  Serial.println(BOARD_SIDE);
 
   ensureWiFi();
 }

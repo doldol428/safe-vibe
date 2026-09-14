@@ -83,6 +83,8 @@
   #events div { font-size: 11px; color: var(--label-dim); }
   #events b { color: var(--alert); font-weight: 600; }
   h2 { font-size: 12px; margin: 0; color: var(--label-dim); font-weight: 600; }
+  #nav { color: var(--label-dim); font-size: 12px; text-decoration: none; }
+  #nav:hover { color: var(--zone); }
 </style>
 </head>
 <body>
@@ -105,6 +107,7 @@
   <h2>이벤트</h2>
   <div id="events" class="scroll"></div>
   <div id="status"></div>
+  <a id="nav" href="/analysis">방향 분석 →</a>
 </aside>
 
 <script>
@@ -205,13 +208,13 @@ function drawDetections() {
   for (const d of dets) {
     const [x1, y1, x2, y2] = d.box;
     const px = x1 * W, py = y1 * H, pw = (x2 - x1) * W, ph = (y2 - y1) * H;
-    const inRoi = d.roi_ids && d.roi_ids.length;
-    ctx.strokeStyle = inRoi ? '#FF5A5A' : '#3DDC97';
+    const hot = (d.roi_ids && d.roi_ids.length) || d.falling;
+    ctx.strokeStyle = hot ? '#FF5A5A' : '#3DDC97';
     ctx.strokeRect(px, py, pw, ph);
 
-    const text = `#${d.id} ${d.name} ${(d.conf * 100).toFixed(0)}%`;
+    const text = `#${d.id} ${d.name}${d.falling ? ' 낙하' : ''} ${(d.conf * 100).toFixed(0)}%`;
     const tw = ctx.measureText(text).width + 8;
-    ctx.fillStyle = inRoi ? '#FF5A5A' : '#3DDC97';
+    ctx.fillStyle = hot ? '#FF5A5A' : '#3DDC97';
     ctx.fillRect(px, Math.max(py - 15, 0), tw, 14);
     ctx.fillStyle = '#17171a';
     ctx.fillText(text, px + 4, Math.max(py - 15, 0) + 10.5);
@@ -469,9 +472,13 @@ async function pollEvents() {
   try {
     const {events} = await (await fetch('/api/events')).json();
     const el = document.getElementById('events');
+    const SIDE_KO = {left: '왼쪽', right: '오른쪽', both: '양쪽'};
     el.innerHTML = events.length
-      ? events.map(e => `<div>${e.ts} <b>${e.roi_name}</b> `
-                       + `#${e.track_id} ${e.name} ${e.dwell}초 체류</div>`).join('')
+      ? events.map(e => e.event === 'fall_warning'
+          ? `<div>${e.ts} <b>낙하</b> #${e.track_id} ${e.name} → 사람 #${e.person_id} `
+            + `${SIDE_KO[e.side]} 진동</div>`
+          : `<div>${e.ts} <b>${e.roi_name}</b> `
+            + `#${e.track_id} ${e.name} ${e.dwell}초 체류</div>`).join('')
       : '<div>아직 이벤트 없음</div>';
   } catch { /* 무시 */ }
 }

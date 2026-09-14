@@ -1,0 +1,347 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>safe_video1 — 방향 분석</title>
+<style>
+  :root {
+    --det: #3DDC97;
+    --front: #3DDC97; --back: #B388FF;        /* 몸 방향 */
+    --left: #5AA9FF;  --right: #FF9F43;       /* 고개/옆모습 방향, 뼈대의 좌우 */
+    --warn: #FFCC00;
+    --bg: #171719; --panel: #1f1f22; --fill: #2a2a2e; --fill-strong: #37373d;
+    --label: #e8e8ea; --label-dim: #9a9aa0; --line: #333338;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; height: 100vh; display: flex; gap: 16px; padding: 16px;
+         background: var(--bg); color: var(--label);
+         font: 14px/1.4 system-ui, "Segoe UI", sans-serif; }
+
+  #stage { position: relative; flex: 1; display: grid; place-items: center; min-width: 0; }
+  #frame { position: relative; line-height: 0; }
+  #v { max-width: 100%; max-height: calc(100vh - 32px); display: block; }
+  #cv { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+
+  aside { width: 360px; flex: none; display: flex; flex-direction: column; gap: 10px;
+          background: var(--panel); border-radius: 10px; padding: 12px; min-height: 0; }
+  header { display: flex; align-items: center; gap: 8px; }
+  h1 { font-size: 15px; margin: 0; flex: 1; }
+  h2 { font-size: 12px; margin: 0; color: var(--label-dim); font-weight: 600; }
+  a.nav { color: var(--label-dim); font-size: 12px; text-decoration: none; }
+  a.nav:hover { color: var(--label); }
+
+  .scroll { overflow-y: auto; overscroll-behavior: contain;
+            scrollbar-width: thin; scrollbar-color: var(--fill-strong) transparent; }
+  .scroll::-webkit-scrollbar { width: 6px; }
+  .scroll::-webkit-scrollbar-thumb { background: var(--fill-strong); border-radius: 3px; }
+
+  #stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 4px; }
+  #stats div { background: var(--fill); border-radius: 6px; padding: 5px 6px; }
+  #stats small { display: block; color: var(--label-dim); font-size: 10px; }
+  #stats b { font-size: 13px; font-variant-numeric: tabular-nums; }
+
+  .note { font-size: 11px; color: var(--label-dim); line-height: 1.5; }
+  .note b { color: var(--label); }
+  .l { color: var(--left); } .r { color: var(--right); }
+  #notice { font-size: 12px; background: rgba(255,204,0,.1); color: var(--warn);
+            border-radius: 6px; padding: 8px; }
+  #notice code { color: var(--label); word-break: break-all; }
+
+  #people { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+  #empty { color: var(--label-dim); font-size: 13px; text-align: center; padding: 20px 0; }
+
+  .card { background: var(--fill); border-radius: 8px; padding: 10px;
+          border: 1px solid transparent; }
+  .card.hl { border-color: var(--fill-strong); background: #303035; }
+  .top { display: flex; align-items: center; gap: 10px; }
+  .arrow { width: 40px; height: 40px; flex: none; border-radius: 50%;
+           display: grid; place-items: center; font-size: 22px; font-weight: 700;
+           background: var(--bg); }
+  .top .t { flex: 1; min-width: 0; }
+  .top b { font-size: 14px; }
+  .top small { display: block; color: var(--label-dim); font-size: 11px; }
+
+  .why { display: grid; grid-template-columns: 34px 58px 1fr; gap: 2px 6px;
+         margin-top: 8px; font-size: 12px; align-items: baseline; }
+  .why span { color: var(--label-dim); }
+  .why i { font-style: normal; color: var(--label-dim); font-size: 11px;
+           font-variant-numeric: tabular-nums; }
+  .warn { margin-top: 6px; font-size: 11px; color: var(--warn); }
+
+  .sub { margin-top: 8px; font-size: 10px; color: var(--label-dim);
+         display: flex; justify-content: space-between; }
+  .timeline { display: flex; gap: 1px; height: 12px; margin-top: 3px; }
+  .timeline div { flex: 1; border-radius: 1px; min-width: 2px; }
+
+  .kps { display: flex; align-items: flex-end; gap: 2px; height: 34px; margin-top: 3px;
+         position: relative; }
+  .kps .bar { flex: 1; background: var(--fill-strong); border-radius: 1px;
+              position: relative; height: 100%; }
+  .kps .bar div { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 1px; }
+  .kps .bar.gap { margin-left: 5px; }
+  .kps .th { position: absolute; left: 0; right: 0; border-top: 1px dashed #6a6a72; }
+
+  #falls { display: flex; flex-direction: column; gap: 4px; max-height: 160px; flex: none; }
+  .fall { display: flex; gap: 8px; align-items: center; background: var(--fill);
+          border-radius: 6px; padding: 6px 8px; font-size: 12px; }
+  .fall.fresh { outline: 2px solid #FF5A5A; }
+  .fall small { display: block; color: var(--label-dim); font-size: 11px; }
+  .side { flex: none; font-weight: 700; font-size: 12px; padding: 3px 8px;
+          border-radius: 10px; color: #17171a; }
+  .side.left { background: var(--left); }
+  .side.right { background: var(--right); }
+  .side.both { background: #FF5A5A; }
+  #falls .none { color: var(--label-dim); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <div id="frame">
+    <img id="v" alt="MJPEG stream">
+    <canvas id="cv"></canvas>
+  </div>
+</div>
+
+<aside>
+  <header>
+    <h1>방향 분석</h1>
+    <a class="nav" href="/">← ROI 설정</a>
+  </header>
+  <div id="stats"></div>
+  <div id="notice" hidden></div>
+  <h2>낙하 경보</h2>
+  <div id="falls" class="scroll"></div>
+  <div class="note">
+    방향은 <b>화면 기준</b>입니다 (오른쪽 = 화면 오른쪽을 향함).
+    뼈대의 <span class="l">파랑</span>은 사람의 왼쪽, <span class="r">주황</span>은 오른쪽 관절입니다.
+    정면인데 파랑이 화면 왼쪽에 있으면 좌우를 뒤집어 읽은 것입니다.
+  </div>
+  <h2>사람 <span id="count"></span></h2>
+  <div id="people" class="scroll"></div>
+</aside>
+
+<script>
+// COCO 17 관절점. 0=코, 홀수=사람의 왼쪽, 짝수=오른쪽.
+const SKELETON = [[15,13],[13,11],[16,14],[14,12],[11,12],[5,11],[6,12],[5,6],
+                  [5,7],[6,8],[7,9],[8,10],[1,2],[0,1],[0,2],[1,3],[2,4],[3,5],[4,6]];
+const sideOf = i => i === 0 ? 'c' : (i % 2 ? 'l' : 'r');
+const KP_COLOR = {l: '#5AA9FF', r: '#FF9F43', c: '#e8e8ea'};
+
+// label -> 표시. 색은 고개/옆 방향(좌우)이 있으면 그것, 없으면 몸 방향.
+const FACING = {
+  'front':       {ko: '정면',          arrow: '●', color: '#3DDC97'},
+  'front-left':  {ko: '정면 · 왼쪽 봄',  arrow: '↙', color: '#5AA9FF'},
+  'front-right': {ko: '정면 · 오른쪽 봄', arrow: '↘', color: '#FF9F43'},
+  'back':        {ko: '뒷모습',        arrow: '○', color: '#B388FF'},
+  'back-left':   {ko: '뒷모습 · 왼쪽 봄', arrow: '↖', color: '#5AA9FF'},
+  'back-right':  {ko: '뒷모습 · 오른쪽 봄', arrow: '↗', color: '#FF9F43'},
+  'left':        {ko: '왼쪽 향함',      arrow: '←', color: '#5AA9FF'},
+  'right':       {ko: '오른쪽 향함',    arrow: '→', color: '#FF9F43'},
+  'side':        {ko: '옆모습',        arrow: '↔', color: '#9a9aa0'},
+  'unknown':     {ko: '판정 불가',      arrow: '?', color: '#55555c'},
+};
+const BODY_KO = {front: '정면', back: '뒷모습', side: '옆모습', unknown: '?'};
+const HEAD_KO = {left: '왼쪽', right: '오른쪽', center: '가운데', unknown: '?'};
+const face = label => FACING[label] || FACING.unknown;
+const fmt = (v, d = 2) => v == null ? '-' : (v >= 0 ? '+' : '') + v.toFixed(d);
+
+const img = document.getElementById('v');
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const $people = document.getElementById('people');
+
+let data = {people: []};
+let hoverId = null;
+
+// ---------------------------------------------------------------- 그리기
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = cv.clientWidth * dpr;
+  cv.height = cv.clientHeight * dpr;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  draw();
+}
+
+function draw() {
+  const W = cv.clientWidth, H = cv.clientHeight;
+  const th = data.kp_conf ?? 0.5;
+  ctx.clearRect(0, 0, W, H);
+
+  for (const p of data.people) {
+    const hl = p.id === hoverId;
+    const f = face(p.facing || 'unknown');
+    const [x1, y1, x2, y2] = p.box;
+
+    ctx.globalAlpha = hoverId == null || hl ? 1 : 0.35;
+    ctx.lineWidth = hl ? 2.5 : 1.5;
+    ctx.strokeStyle = f.color;
+    ctx.strokeRect(x1 * W, y1 * H, (x2 - x1) * W, (y2 - y1) * H);
+
+    const kp = p.pose && p.pose.kp;
+    if (kp) {
+      ctx.lineWidth = hl ? 3 : 2;
+      for (const [a, b] of SKELETON) {
+        if (kp[a][2] < th || kp[b][2] < th) continue;
+        const sa = sideOf(a), sb = sideOf(b);
+        ctx.strokeStyle = sa === sb ? KP_COLOR[sa] : KP_COLOR.c;
+        ctx.beginPath();
+        ctx.moveTo(kp[a][0] * W, kp[a][1] * H);
+        ctx.lineTo(kp[b][0] * W, kp[b][1] * H);
+        ctx.stroke();
+      }
+      kp.forEach(([x, y, c], i) => {
+        const ok = c >= th;
+        ctx.beginPath();
+        ctx.arc(x * W, y * H, ok ? 3.5 : 2.5, 0, Math.PI * 2);
+        if (ok) { ctx.fillStyle = KP_COLOR[sideOf(i)]; ctx.fill(); }
+        else { ctx.strokeStyle = 'rgba(232,232,234,.35)'; ctx.lineWidth = 1; ctx.stroke(); }
+      });
+    }
+
+    const text = `#${p.id} ${f.arrow} ${p.facing ? f.ko : '판정 대기'}`;
+    ctx.font = '12px system-ui, sans-serif';
+    const tw = ctx.measureText(text).width + 10;
+    const ly = Math.max(y1 * H - 18, 0);
+    ctx.fillStyle = f.color;
+    ctx.fillRect(x1 * W, ly, tw, 17);
+    ctx.fillStyle = '#17171a';
+    ctx.fillText(text, x1 * W + 5, ly + 12.5);
+    ctx.globalAlpha = 1;
+  }
+
+  // 떨어지는 중인 박스 — 점선 빨강
+  ctx.setLineDash([6, 4]);
+  for (const b of data.falling_boxes || []) {
+    const [x1, y1, x2, y2] = b.box;
+    ctx.lineWidth = 2.5;
+    ctx.strokeStyle = '#FF5A5A';
+    ctx.strokeRect(x1 * W, y1 * H, (x2 - x1) * W, (y2 - y1) * H);
+    ctx.font = 'bold 12px system-ui, sans-serif';
+    ctx.fillStyle = '#FF5A5A';
+    ctx.fillText(`낙하 #${b.id}`, x1 * W, Math.max(y1 * H - 6, 12));
+  }
+  ctx.setLineDash([]);
+}
+
+// ---------------------------------------------------------------- 낙하 경보
+const SIDE_KO = {left: '왼쪽', right: '오른쪽', both: '양쪽'};
+const BASIS_KO = {
+  back: '뒷모습이라 화면과 같은 쪽', front: '정면이라 화면과 반대쪽',
+  profile: '옆모습이라 몸의 좌우를 알 수 없음', center: '머리 바로 위',
+  screen: '방향을 몰라 화면 기준',
+};
+
+function falls(d) {
+  const list = d.falls || [];
+  const now = Date.now() / 1000;
+  document.getElementById('falls').innerHTML = list.length
+    ? list.map(e => `<div class="fall${now - e.ts_epoch < 3 ? ' fresh' : ''}">
+        <span class="side ${e.side}">${SIDE_KO[e.side]} 진동</span>
+        <div><b>${e.ts} ${e.name} #${e.track_id} → 사람 #${e.person_id}</b>
+          <small>화면 ${SIDE_KO[e.screen_side]} · ${BASIS_KO[e.basis] || e.basis}
+            · ${e.speed} 화면높이/초</small></div>
+      </div>`).join('')
+    : '<div class="none">아직 없음</div>';
+}
+
+// ---------------------------------------------------------------- 패널
+function stats(d) {
+  const cell = (k, v) => `<div><small>${k}</small><b>${v ?? '-'}</b></div>`;
+  document.getElementById('stats').innerHTML =
+      cell('송출 fps', d.fps) + cell('추론 fps', d.ai_fps)
+    + cell('검출 ms', d.infer_ms) + cell('pose ms', d.pose_ms)
+    + cell('사람', d.people.length);
+  document.getElementById('count').textContent = d.people.length ? `${d.people.length}명` : '';
+
+  const $n = document.getElementById('notice');
+  $n.hidden = !!d.pose_model;
+  if (!d.pose_model)
+    $n.innerHTML = `pose 모델이 없어 방향 분석이 꺼져 있습니다.<br>`
+                 + `<code>${d.pose_model_path ?? ''}</code> 에 yolov8n-pose.onnx 를 두고 앱을 다시 시작하세요.`;
+}
+
+function card(p, d) {
+  const f = face(p.facing || 'unknown');
+  const po = p.pose;
+  const th = d.kp_conf ?? 0.5;
+  const now = po ? face(po.label) : null;
+
+  let why = '';
+  if (po) {
+    why = `<div class="why">
+      <span>몸</span><b>${BODY_KO[po.body]}</b>
+      <i>어깨 간격 ${fmt(po.sh_dx)} (±${d.side_ratio} 넘으면 정면/뒤)</i>
+      <span>고개</span><b>${HEAD_KO[po.head]}</b>
+      <i>코 위치 ${fmt(po.nose_off)} (±${d.head_ratio} 넘으면 좌/우)</i>
+    </div>`
+    + (po.conflict ? `<div class="warn">⚠ 뒷모습인데 두 눈과 코가 보임 — 정면을 좌우 뒤집어 읽었을 수 있음</div>` : '');
+  } else {
+    why = `<div class="why"><span></span><i style="grid-column: span 2">이번 추론에서 관절점을 못 붙였습니다 (가려짐/작음)</i></div>`;
+  }
+
+  const log = p.facing_log || [];
+  const timeline = log.map(([t, l]) =>
+    `<div style="background:${face(l).color}" title="${t}초 ${face(l).ko}"></div>`).join('')
+    || '<div style="background:var(--fill-strong)"></div>';
+
+  let kps = '';
+  if (po) {
+    kps = po.kp.map(([, , c], i) => {
+      const gap = i === 5 || i === 11 ? ' gap' : '';      // 얼굴 | 팔 | 다리
+      const color = c >= th ? KP_COLOR[sideOf(i)] : '#55555c';
+      return `<div class="bar${gap}" title="${d.keypoints[i]} ${(c * 100).toFixed(0)}%">`
+           + `<div style="height:${Math.round(c * 100)}%;background:${color}"></div></div>`;
+    }).join('') + `<div class="th" style="bottom:${th * 100}%"></div>`;
+  }
+
+  return `<div class="card${p.id === hoverId ? ' hl' : ''}" data-id="${p.id}">
+    <div class="top">
+      <div class="arrow" style="color:${f.color}">${f.arrow}</div>
+      <div class="t">
+        <b>#${p.id} ${p.facing ? f.ko : '판정 대기'}</b>
+        <small>최근 ${d.window}번 다수결 · 이번: ${now ? now.ko : '-'} · 사람 ${(p.conf * 100).toFixed(0)}% · ${p.age}초</small>
+      </div>
+    </div>
+    ${why}
+    <div class="sub"><span>방향 이력 (오래된 → 최근)</span><span>${log.length}회</span></div>
+    <div class="timeline">${timeline}</div>
+    ${po ? `<div class="sub"><span>관절점 신뢰도 · 얼굴 | 팔 | 다리</span><span>기준선 ${th}</span></div>
+            <div class="kps">${kps}</div>` : ''}
+  </div>`;
+}
+
+function render(d) {
+  stats(d);
+  falls(d);
+  const people = [...d.people].sort((a, b) => a.id - b.id);
+  $people.innerHTML = people.length
+    ? people.map(p => card(p, d)).join('')
+    : `<div id="empty">${d.pose_model ? '사람이 검출되면 여기에 표시됩니다' : '방향 분석 비활성'}</div>`;
+}
+
+// 카드에 마우스를 올리면 영상에서 그 사람만 강조한다.
+$people.addEventListener('mouseover', e => {
+  const el = e.target.closest('.card');
+  const id = el ? Number(el.dataset.id) : null;
+  if (id !== hoverId) { hoverId = id; render(data); draw(); }
+});
+$people.addEventListener('mouseleave', () => { hoverId = null; render(data); draw(); });
+
+// ---------------------------------------------------------------- 폴링
+async function poll() {
+  try {
+    data = await (await fetch('/api/analysis')).json();
+    render(data);
+    draw();
+  } catch { /* 서버 재시작 중 — 다음 주기에 다시 시도 */ }
+}
+
+new ResizeObserver(resize).observe(img);
+img.onload = resize;
+img.src = '/stream.mjpg?t=' + Date.now();
+setInterval(poll, 250);
+poll();
+</script>
+</body>
+</html>

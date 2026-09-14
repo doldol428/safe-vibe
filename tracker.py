@@ -11,9 +11,16 @@ Kalman 필터 없이 IoU 매칭만 쓰는 SORT 단순화판이다. 예측 모델
   - 빈 행렬은 (0,2) 형태로 돌려주고 IoU 분모에 1e-6을 더한다.
     각각 IndexError와 0 나눗셈을 막기 위한 것으로, 둘 다 실제로 밟기 쉽다.
 """
+import collections
+
 import numpy as np
 
-from config import TRACK_IOU, TRACK_MAX_AGE, TRACK_MIN_HITS
+from config import (FACING_HISTORY, FACING_WINDOW, TRACK_IOU, TRACK_MAX_AGE,
+                    TRACK_MIN_HITS, TRACK_TRAIL)
+
+
+def box_center(box):
+    return (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
 
 
 def iou_batch(a, b):
@@ -59,19 +66,45 @@ class Track:
         self.hits = 1
         self.time_since_update = 0
         self.first_seen = now
+        # 중심점 이력 (시각, cx, cy). 낙하처럼 '움직임'으로 판정하는 이벤트가 쓴다.
+        self.trail = collections.deque([(now, *box_center(self.box))], maxlen=TRACK_TRAIL)
+        self.falling = False       # 지금 떨어지는 중인지 — fall.py 판정을 app.py 가 채운다
+        self.fall_fired = False    # 이 트랙으로 낙하 경보를 이미 냈는지
         # ROI 체류 상태 — app.py가 채운다.
         self.roi_since = {}     # roi_id -> 진입 시각
         self.roi_left = {}      # roi_id -> 벗어난 시각 (경계 흔들림 디바운스용)
         self.roi_fired = set()  # 이미 이벤트를 낸 roi_id
         self.roi_in = set()     # 지금 실제로 안에 있는 roi_id (표시용)
+        # 자세/방향 상태 — pose.py 가 채운다.
+        self.pose = None                                          # 이번 추론의 관절점과 판정
+        self.facing_votes = collections.deque(maxlen=FACING_WINDOW)
+        self.facing_log = collections.deque(maxlen=FACING_HISTORY)  # (처음 잡힌 뒤 초, label)
+        self.sh_dx_votes = collections.deque(maxlen=FACING_WINDOW)  # 어깨 간격 — 몸이 앞/뒤 어느 쪽인지
 
-    def update(self, det):
+    def update(self, det, now):
         self.box = det["box"]
         self.cls = det["cls"]
         self.name = det["name"]
         self.conf = det["conf"]
         self.hits += 1
         self.time_since_update = 0
+        self.trail.append((now, *box_center(self.box)))
+
+    def motion(self, window):
+        """-> (drop, speed). 화면 높이 기준이고 아래가 + 다.
+
+        drop  최근 window 초 동안 내려간 양. 검출 흔들림(±0.01)은 쌓이지 않아 여기서 걸러진다.
+        speed 직전 두 점 사이의 하강 속도. window 전체 평균으로 재면 떨어지기 직전까지
+              가만히 있던 구간이 섞여 실제보다 느리게 나온다.
+        프레임 수가 아니라 시각으로 재므로 AI_FPS 가 바뀌어도 기준값을 다시 잡지 않아도 된다.
+        """
+        t1, _, y1 = self.trail[-1]
+        old = next(e for e in self.trail if t1 - e[0] <= window)
+        drop = y1 - old[2]
+        if len(self.trail) < 2:
+            return drop, 0.0
+        t0, _, y0 = self.trail[-2]
+        return drop, ((y1 - y0) / (t1 - t0) if t1 > t0 else 0.0)
 
     def to_dict(self, now):
         return {
@@ -82,7 +115,33 @@ class Track:
             "conf": self.conf,
             "age": round(now - self.first_seen, 1),   # 처음 잡힌 뒤 지난 시간(초)
             "roi_ids": sorted(self.roi_in),
+            "facing": self.facing(),
+            "falling": self.falling,
         }
+
+    def facing(self):
+        """최근 FACING_WINDOW 번 판정의 다수결. 판정 불가(unknown)는 표에서 뺀다."""
+        votes = [v for v in self.facing_votes if v != "unknown"]
+        if not votes:
+            return None
+        return collections.Counter(votes).most_common(1)[0][0]
+
+    def body_axis(self):
+        """최근 어깨 간격(sh_dx) 평균. + 면 카메라 쪽(정면), - 면 등, 0 근처면 옆모습. 없으면 None.
+
+        화면 표시용 label 은 비스듬한 뒷모습에서 back-right 와 right 사이를 오간다.
+        좌/우 판정은 그 경계에 휘둘리면 안 되므로 값 자체의 평균을 따로 쓴다.
+        """
+        if not self.sh_dx_votes:
+            return None
+        return sum(self.sh_dx_votes) / len(self.sh_dx_votes)
+
+    def to_analysis(self, now):
+        """분석 페이지용. to_dict 에 이번 관절점/판정 근거와 방향 이력을 더한다."""
+        d = self.to_dict(now)
+        d["pose"] = self.pose
+        d["facing_log"] = [list(e) for e in self.facing_log]
+        return d
 
 
 class IOUTracker:
@@ -115,7 +174,7 @@ class IOUTracker:
 
         matched_d = set()
         for d, t in matches:
-            self.tracks[t].update(dets[d])
+            self.tracks[t].update(dets[d], now)
             matched_d.add(d)
 
         for i, det in enumerate(dets):              # 짝을 못 찾은 검출 -> 새 트랙

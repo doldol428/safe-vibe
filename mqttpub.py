@@ -1,6 +1,11 @@
 """ROI 체류 이벤트를 MQTT로 내보낸다.
 
-    DetectionWorker -> Publisher.publish(event) -> safe-vibe/alert
+    DetectionWorker -> Publisher.publish(event) -> safe-vibe/alert          (ROI 체류, 양쪽 낙하)
+                                                -> safe-vibe/alert/left     (왼쪽 낙하)
+                                                -> safe-vibe/alert/right    (오른쪽 낙하)
+
+좌/우 진동 클라이언트는 같은 펌웨어로 공통 토픽과 자기 쪽 토픽을 함께 구독한다.
+걸러내기를 브로커가 하므로 보드는 자기에게 온 것만 받는다.
 
 브로커는 이 프로젝트가 띄우지 않는다. 이미 있는 브로커 주소를 MQTT_HOST 로 주면
 되고, 없으면 로컬에 mosquitto 를 띄워 localhost 를 주면 된다.
@@ -53,6 +58,7 @@ class Publisher:
             "enabled": True,
             "broker": f"{self.host}:{self.port}",
             "topic": self.topic,
+            "side_topics": [f"{self.topic}/left", f"{self.topic}/right"],
             "qos": self.qos,
             "connected": self.connected,
             "sent": self.sent,
@@ -115,13 +121,17 @@ class Publisher:
 
     # ------------------------------------------------------------ 발행
 
-    def publish(self, event):
-        """이벤트 하나를 발행한다. 실패해도 예외를 밖으로 내보내지 않는다."""
+    def publish(self, event, subtopic=None):
+        """이벤트 하나를 발행한다. 실패해도 예외를 밖으로 내보내지 않는다.
+
+        subtopic 을 주면 '<topic>/<subtopic>' 으로 보낸다 (left/right 진동 클라이언트 구분).
+        """
         if not self.enabled or self.client is None:
             return False
 
         payload = dict(event)
-        payload["event"] = "roi_dwell"
+        payload.setdefault("event", "roi_dwell")
+        topic = f"{self.topic}/{subtopic}" if subtopic else self.topic
         # 화면용 ts 는 "%H:%M:%S" 로컬 문자열이라 날짜도 시간대도 없다. 받는 쪽이
         # 정렬하고 보관하려면 절대 시각이 필요하므로 epoch 초를 같이 싣는다.
         payload.setdefault("ts_epoch", round(time.time(), 3))
@@ -130,7 +140,7 @@ class Publisher:
         try:
             # retain=False. 경보를 retain 하면 나중에 붙은 구독자가 한참 지난
             # 이벤트를 현재 상황인 것처럼 받게 된다.
-            info = self.client.publish(self.topic, body, qos=self.qos, retain=False)
+            info = self.client.publish(topic, body, qos=self.qos, retain=False)
         except Exception as e:
             self._count_drop(str(e))
             return False

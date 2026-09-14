@@ -25,8 +25,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import config as cfg
 import detector as det
+import fall
 import frames
 import mqttpub
+import pose
 import roistore
 import tracker as trk
 
@@ -42,15 +44,20 @@ class DetectionWorker:
     만큼만 쓴다. (Pi 5 CPU-only 기준 AI 3~5fps / 화면 10~15fps 권장)
     """
 
-    def __init__(self, pipeline, model, publisher):
+    def __init__(self, pipeline, model, publisher, pose_model=None):
         self.pipeline = pipeline
         self.model = model
         self.publisher = publisher
+        self.pose_model = pose_model    # 없으면 방향 분석을 건너뛴다
         self.tracker = trk.IOUTracker()
         self.lock = threading.Lock()
         self.detections = []
+        self.people = []                # 분석 페이지용 사람 트랙 (관절점/방향 포함)
         self.roi_hits = {}
         self.infer_ms = 0.0
+        self.pose_ms = None             # 이번 주기에 pose 를 안 돌렸으면 None
+        self.falling_boxes = []         # 지금 떨어지는 중인 트랙 (화면 표시용)
+        self.fall_last = {}             # 사람 트랙 id -> 마지막 낙하 경보 시각
         self.meter = frames.FpsMeter()
         self.events = deque(maxlen=cfg.EVENT_LOG_SIZE)
         self._stop = threading.Event()
@@ -73,6 +80,18 @@ class DetectionWorker:
                 "detections": list(self.detections),
                 "roi_hits": dict(self.roi_hits),
                 "infer_ms": round(self.infer_ms, 1),
+                "pose_ms": None if self.pose_ms is None else round(self.pose_ms, 1),
+                "ai_fps": self.meter.value,
+            }
+
+    def analysis(self):
+        with self.lock:
+            return {
+                "people": list(self.people),
+                "falling_boxes": list(self.falling_boxes),
+                "falls": [e for e in self.events if e.get("event") == "fall_warning"][:10],
+                "infer_ms": round(self.infer_ms, 1),
+                "pose_ms": None if self.pose_ms is None else round(self.pose_ms, 1),
                 "ai_fps": self.meter.value,
             }
 
@@ -104,15 +123,65 @@ class DetectionWorker:
             # 체류 판정이 틀어질 수 있다 (Pi는 RTC가 없어 부팅 직후 크게 뛴다).
             now = time.monotonic()
             tracks = self.tracker.update(results, now)
+            pose_ms = self._pose(frame, tracks, now)
+            self._match_falls(tracks, now)
             self._match_rois(tracks, now)
 
             self.meter.tick()
             with self.lock:
                 self.infer_ms = infer_ms
+                self.pose_ms = pose_ms
 
             sleep = interval - (time.perf_counter() - started)
             if sleep > 0:
                 self._stop.wait(sleep)  # stop() 하면 대기 중에도 바로 깬다
+
+    def _pose(self, frame, tracks, now):
+        """사람 트랙이 있을 때만 pose 를 돌려 트랙에 관절점/방향을 붙인다. -> 걸린 ms 또는 None.
+
+        사람이 없는 프레임까지 돌리면 CPU 만 두 배로 쓴다.
+        """
+        if self.pose_model is None or not any(t.name == cfg.POSE_CLASS for t in tracks):
+            return None
+        t0 = time.perf_counter()
+        try:
+            pose.attach(tracks, self.pose_model.infer(frame), now)
+        except Exception as e:          # pose 가 실패해도 검출/경보는 계속되어야 한다
+            print(f"[pose] 추론 실패: {e}", flush=True)
+            return None
+        return (time.perf_counter() - t0) * 1000
+
+    def _match_falls(self, tracks, now):
+        """떨어지는 박스를 찾아 가까운 사람의 왼쪽/오른쪽 진동 클라이언트로 경보를 낸다.
+
+        판정은 fall.py 가 하고, 여기서는 같은 사람에게 연달아 울리지 않게 거르고 발행만 한다.
+        pose 가 먼저 돌아야 사람 방향이 채워져 있으므로 _pose() 다음에 부른다.
+        """
+        new_events = []
+        for box, person, j in fall.detect(tracks):
+            if now - self.fall_last.get(person.id, float("-inf")) < cfg.FALL_COOLDOWN_SEC:
+                continue
+            self.fall_last[person.id] = now
+            new_events.append({
+                "event": "fall_warning",
+                "ts": time.strftime("%H:%M:%S"),
+                "ts_epoch": round(time.time(), 3),
+                "track_id": box.id,
+                "name": box.name,
+                "person_id": person.id,
+                **j,
+            })
+
+        with self.lock:
+            for event in new_events:
+                self.events.appendleft(event)
+
+        for e in new_events:
+            print(f"[fall] #{e['track_id']} {e['name']} 낙하 -> 사람 #{e['person_id']} "
+                  f"{fall.SIDE_KO[e['side']]} 진동 (화면 {e['screen_side']}, "
+                  f"방향 {e['facing']}, 근거 {e['basis']}, {e['speed']}/s)", flush=True)
+            # 양쪽이면 공통 토픽으로 보내 두 보드가 다 받게 한다.
+            self.publisher.publish(e, subtopic=None if e["side"] == "both" else e["side"])
 
     @staticmethod
     def _in_roi(box, points):
@@ -160,9 +229,12 @@ class DetectionWorker:
         new_events = []
         with self.lock:
             self.detections = [t.to_dict(now) for t in tracks]
+            self.people = [t.to_analysis(now) for t in tracks if t.name == cfg.POSE_CLASS]
+            self.falling_boxes = [t.to_dict(now) for t in tracks if t.falling]
             self.roi_hits = hits
             for t, rid in fired:
                 event = {
+                    "event": "roi_dwell",
                     "ts": time.strftime("%H:%M:%S"),
                     "roi_id": rid,
                     "roi_name": names.get(rid, "?"),
@@ -221,8 +293,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"events": self.worker.event_list() if self.worker else []})
         elif self.path == "/api/status":
             self._json(self.status())
+        elif self.path == "/api/analysis":
+            self._json(self.analysis())
         elif self.path in ("/", "/index.html"):
-            self.serve_index()
+            self.serve_html(cfg.INDEX_FILE)
+        elif self.path in ("/analysis", "/analysis.html"):
+            self.serve_html(cfg.ANALYSIS_FILE)
         else:
             self.send_error(404)
 
@@ -265,6 +341,8 @@ class Handler(BaseHTTPRequestHandler):
             "model": model.path.name if model else None,
             "model_input": list(model.size) if model else None,
             "classes": len(model.names) if model else 0,
+            "pose_model": (self.worker.pose_model.path.name
+                           if self.worker and self.worker.pose_model else None),
             "event_classes": cfg.EVENT_CLASSES,
             "tracker": (f"IoU (max_age={cfg.TRACK_MAX_AGE}, min_hits={cfg.TRACK_MIN_HITS}, "
                         f"iou={cfg.TRACK_IOU})"),
@@ -274,11 +352,32 @@ class Handler(BaseHTTPRequestHandler):
             "mqtt": self.publisher.status() if self.publisher else {"enabled": False},
         }
 
-    def serve_index(self):
+    def analysis(self):
+        """분석 페이지용. 사람 트랙마다 관절점, 방향 판정 근거, 최근 방향 이력을 준다."""
+        pm = self.worker.pose_model if self.worker else None
+        data = self.worker.analysis() if self.worker else {
+            "people": [], "infer_ms": 0, "pose_ms": None, "ai_fps": 0}
+        data.update({
+            "fps": self.pipeline.fps,
+            "source": self.source_name,
+            "pose_model": pm.path.name if pm else None,
+            "pose_model_path": str(cfg.POSE_MODEL),
+            "keypoints": pose.KEYPOINTS,
+            "kp_conf": cfg.KP_CONF,
+            "side_ratio": cfg.FACING_SIDE_RATIO,
+            "head_ratio": cfg.FACING_HEAD_RATIO,
+            "window": cfg.FACING_WINDOW,
+            "fall": {"class": cfg.FALL_CLASS, "min_drop": cfg.FALL_MIN_DROP,
+                     "min_speed": cfg.FALL_MIN_SPEED, "near_ratio": cfg.FALL_NEAR_RATIO,
+                     "center_ratio": cfg.FALL_CENTER_RATIO},
+        })
+        return data
+
+    def serve_html(self, path):
         try:
-            body = cfg.INDEX_FILE.read_bytes()
+            body = path.read_bytes()
         except FileNotFoundError:
-            return self.send_error(500, "index.html not found")
+            return self.send_error(500, f"{path.name} not found")
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -381,10 +480,14 @@ def main():
 
         try:
             model = det.Detector()
-            worker = DetectionWorker(pipeline, model, publisher).start()
             print(f"model : {model.path.name} "
                   f"({model.task}, {len(model.names)}클래스, 입력 {model.size[0]}x{model.size[1]})",
                   flush=True)
+            pose_model, why = pose.load(cfg.POSE_MODEL)
+            print(f"pose  : {pose_model.path.name} (관절점 {pose_model.num_kpts}개, "
+                  f"'{cfg.POSE_CLASS}' 트랙에 방향 판정)" if pose_model
+                  else f"pose  : 없음 — 방향 분석 비활성 ({why})", flush=True)
+            worker = DetectionWorker(pipeline, model, publisher, pose_model).start()
         except det.NoModelError as e:
             print(f"model : 없음 — 검출 비활성 ({e})", flush=True)
 
@@ -396,7 +499,7 @@ def main():
         match = "발밑 점" if cfg.ROI_MATCH == "foot" else f"겹침 비율 > {cfg.ROI_OVERLAP_MIN:g}"
         print(f"roi   : {roistore.ROI_FILE} -> {len(roistore.list_rois())} ROI (판정: {match})",
               flush=True)
-        print(f"serving http://localhost:{cfg.PORT}", flush=True)
+        print(f"serving http://localhost:{cfg.PORT}  (방향 분석: /analysis)", flush=True)
         try:
             # OSError를 잡아서 폴백하면 "포트 사용 중" 에러까지 삼켜버리므로,
             # IPv6 지원 여부는 미리 물어보고 고른다.

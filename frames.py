@@ -47,17 +47,18 @@ class NoVideoError(RuntimeError):
 
 
 def find_video(video_dir=VIDEO_DIR):
-    """video/ 에 mp4 하나만 둔다 — model/ 의 단일 onnx 규칙과 같은 방식."""
+    """video/ 의 mp4 중 이름순 첫 번째를 쓴다. 다른 영상은 VIDEO=경로 로 고른다."""
     video_dir = Path(video_dir)
     if not video_dir.is_dir():
         raise NoVideoError(f"영상 디렉터리가 없습니다: {video_dir}")
-    found = sorted(video_dir.glob("*.mp4"))
+    # 이름순으로 정렬해 매번 같은 파일이 골라지게 한다. 대소문자는 무시한다
+    # (Windows 에서는 원래 무시하고, Linux 에서만 대문자가 앞서는 차이를 없앤다).
+    found = sorted(video_dir.glob("*.mp4"), key=lambda f: f.name.lower())
     if not found:
         raise NoVideoError(f"{video_dir} 에 .mp4 파일이 없습니다")
     if len(found) > 1:
-        raise NoVideoError(
-            f"{video_dir} 에 .mp4가 여러 개입니다(단일 영상만 지원): "
-            + ", ".join(f.name for f in found))
+        print(f"video : .mp4 {len(found)}개 중 첫 번째 사용 -> {found[0].name} "
+              f"(다른 영상은 VIDEO=경로)", flush=True)
     return found[0]
 
 
